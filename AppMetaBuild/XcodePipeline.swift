@@ -20,12 +20,17 @@ final class XcodePipeline {
         res.schemes = schemes
         res.suggestedScheme = scheme.isEmpty ? Self.suggestReleaseScheme(schemes) : scheme
         if res.suggestedScheme.isEmpty {
-            throw BuildError.message(L10n.t("No scheme found; share a Release scheme in Xcode.", "没有 scheme；请在 Xcode 里 Share 一个 Release scheme。"))
+            throw BuildError.message(L10n.t("No scheme found; share a scheme in Xcode.", "没有 scheme；请在 Xcode 里 Share 一个 scheme。"))
         }
-        if let settingsData = try? runCapturing([
+        res.configuration = Self.resolveConfiguration(project: project, scheme: res.suggestedScheme)
+        var settingsArgs = [
             "/usr/bin/xcodebuild", "-showBuildSettings", "-json",
-            "-project", project, "-scheme", res.suggestedScheme, "-configuration", "Release",
-        ]) {
+            "-project", project, "-scheme", res.suggestedScheme,
+        ]
+        if !res.configuration.isEmpty {
+            settingsArgs += ["-configuration", res.configuration]
+        }
+        if let settingsData = try? runCapturing(settingsArgs) {
             let settings = Self.pickSettings(settingsData)
             res.bundleId = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
             res.teamId = settings["DEVELOPMENT_TEAM"] ?? ""
@@ -33,48 +38,79 @@ final class XcodePipeline {
             res.signingStyle = settings["CODE_SIGN_STYLE"] ?? ""
             res.codeSignIdentity = settings["CODE_SIGN_IDENTITY"] ?? ""
             res.profileSpecifier = settings["PROVISIONING_PROFILE_SPECIFIER"] ?? settings["PROVISIONING_PROFILE"] ?? ""
+            if res.configuration.isEmpty {
+                res.configuration = settings["CONFIGURATION"] ?? ""
+            }
         }
         if let ident = try? runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]) {
             let text = String(data: ident, encoding: .utf8) ?? ""
-            res.distributionCerts = text.split(separator: "\n").map(String.init).filter {
+            let lines = text.split(separator: "\n").map(String.init)
+            res.distributionCerts = lines.filter {
                 $0.contains("Apple Distribution") || $0.contains("iPhone Distribution")
+            }
+            res.developmentCerts = lines.filter {
+                $0.contains("Apple Development") || $0.contains("iPhone Developer")
             }
         }
         let installed = Self.installedProfiles()
-        res.profiles = Self.matchProfiles(installed, bundleId: res.bundleId, teamId: res.teamId, specifier: res.profileSpecifier)
+        res.profiles = Self.matchProfiles(
+            installed,
+            bundleId: res.bundleId,
+            teamId: res.teamId,
+            specifier: res.profileSpecifier,
+            configuration: res.configuration
+        )
         res.selectedProfile = res.profiles.first
         if res.signingStyle.lowercased() == "automatic" {
             res.warnings.append(L10n.t(
-                "Release signing style is Automatic. This app exports with manual signing; set the Release scheme to Manual in Xcode.",
-                "Release 签名是 Automatic。本应用按手动签名导出；请在 Xcode 把 Release scheme 设为 Manual。"
+                "Signing style is Automatic. This app exports with manual signing; set the scheme to Manual in Xcode.",
+                "签名方式是 Automatic。本应用按手动签名导出；请在 Xcode 把该 scheme 设为 Manual。"
             ))
         }
-        if res.distributionCerts.isEmpty {
+        if res.usesDevelopmentSigning {
+            if res.developmentCerts.isEmpty {
+                res.warnings.append(L10n.t(
+                    "No Apple Development certificate in the keychain. Import it in Xcode or Keychain Access.",
+                    "钥匙串里没有 Apple Development 证书。请在 Xcode 或钥匙串中导入。"
+                ))
+            }
+        } else if res.distributionCerts.isEmpty {
             res.warnings.append(L10n.t(
                 "No Apple Distribution certificate in the keychain. Import it in Xcode or Keychain Access.",
                 "钥匙串里没有 Apple Distribution 证书。请在 Xcode 或钥匙串中导入。"
             ))
         }
         if res.selectedProfile == nil {
-            res.warnings.append(L10n.t(
-                "No matching App Store provisioning profile. Double-click the .mobileprovision or assign it on the Release scheme in Xcode.",
-                "没有匹配的 App Store 描述文件。请双击 .mobileprovision，或在 Xcode 的 Release scheme 上指定。"
-            ))
+            if res.usesDevelopmentSigning {
+                res.warnings.append(L10n.t(
+                    "No matching Development provisioning profile. Double-click the .mobileprovision or assign it on this scheme in Xcode.",
+                    "没有匹配的开发描述文件。请双击 .mobileprovision，或在 Xcode 的该 scheme 上指定。"
+                ))
+            } else {
+                res.warnings.append(L10n.t(
+                    "No matching App Store provisioning profile. Double-click the .mobileprovision or assign it on this scheme in Xcode.",
+                    "没有匹配的 App Store 描述文件。请双击 .mobileprovision，或在 Xcode 的该 scheme 上指定。"
+                ))
+            }
         }
-        res.ready = !res.bundleId.isEmpty && !res.teamId.isEmpty && res.selectedProfile != nil && !res.distributionCerts.isEmpty
+        let hasCert = res.usesDevelopmentSigning ? !res.developmentCerts.isEmpty : !res.distributionCerts.isEmpty
+        res.ready = !res.bundleId.isEmpty && !res.teamId.isEmpty && res.selectedProfile != nil && hasCert
         return res
     }
 
     func archiveAndExport(
         project: String,
         scheme: String,
+        configuration: String,
         teamId: String,
         bundleId: String,
         profile: String,
+        profileKind: String,
         onLog: @escaping (String) -> Void,
         onStage: @escaping (String, String) -> Void
     ) throws -> String {
         let proj = try Self.resolveXcodeproj(project)
+        let config = configuration.isEmpty ? "Release" : configuration
         let fmt = DateFormatter()
         fmt.dateFormat = "yyyyMMdd-HHmmss"
         let stamp = fmt.string(from: Date())
@@ -84,16 +120,16 @@ final class XcodePipeline {
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
         let archivePath = outDir.appendingPathComponent("\(scheme).xcarchive").path
         let plistPath = outDir.appendingPathComponent("ExportOptions.plist").path
-        try Self.exportOptionsPlist(teamId: teamId, bundleId: bundleId, profile: profile)
+        try Self.exportOptionsPlist(teamId: teamId, bundleId: bundleId, profile: profile, profileKind: profileKind)
             .write(toFile: plistPath, atomically: true, encoding: .utf8)
 
-        onStage("archive", L10n.t("Archiving Release. This can take several minutes.", "正在 Archive Release，可能需要几分钟。"))
-        onLog("xcodebuild archive -project \(proj) -scheme \(scheme)")
+        onStage("archive", L10n.t("Archiving \(config). This can take several minutes.", "正在 Archive \(config)，可能需要几分钟。"))
+        onLog("xcodebuild archive -project \(proj) -scheme \(scheme) -configuration \(config)")
         try runStreaming(onLog: onLog, arguments: [
             "/usr/bin/xcodebuild", "archive",
             "-project", proj,
             "-scheme", scheme,
-            "-configuration", "Release",
+            "-configuration", config,
             "-destination", "generic/platform=iOS",
             "-archivePath", archivePath,
         ], directory: URL(fileURLWithPath: proj).deletingLastPathComponent().path)
@@ -224,6 +260,64 @@ final class XcodePipeline {
         schemes.first { $0.lowercased().contains("release") } ?? schemes.first ?? ""
     }
 
+    static func inferredConfigurationName(_ scheme: String) -> String {
+        let n = scheme.lowercased()
+        if n.contains("debug") || n.contains("develop") || n.hasSuffix("-dev") || n.hasSuffix("_dev") || n.contains(".dev") {
+            return "Debug"
+        }
+        if n.contains("release") || n.contains("appstore") || n.contains("app-store") || n.contains("distribution") || n.contains("prod") {
+            return "Release"
+        }
+        return ""
+    }
+
+    static func resolveConfiguration(project: String, scheme: String) -> String {
+        let inferred = inferredConfigurationName(scheme)
+        guard let xml = schemeXML(project: project, scheme: scheme) else {
+            return inferred.isEmpty ? "Release" : inferred
+        }
+        let launch = actionBuildConfiguration(xml: xml, action: "LaunchAction")
+        let archive = actionBuildConfiguration(xml: xml, action: "ArchiveAction")
+        if inferred == "Debug" {
+            return launch.isEmpty ? "Debug" : launch
+        }
+        if inferred == "Release" {
+            return archive.isEmpty ? "Release" : archive
+        }
+        if !archive.isEmpty { return archive }
+        if !launch.isEmpty { return launch }
+        return "Release"
+    }
+
+    static func schemeXML(project: String, scheme: String) -> String? {
+        let proj = URL(fileURLWithPath: project)
+        var candidates = [
+            proj.appendingPathComponent("xcshareddata/xcschemes/\(scheme).xcscheme"),
+        ]
+        let userdata = proj.appendingPathComponent("xcuserdata")
+        if let users = try? FileManager.default.contentsOfDirectory(atPath: userdata.path) {
+            for user in users {
+                candidates.append(userdata.appendingPathComponent("\(user)/xcschemes/\(scheme).xcscheme"))
+            }
+        }
+        for url in candidates {
+            if let xml = try? String(contentsOf: url, encoding: .utf8) { return xml }
+        }
+        return nil
+    }
+
+    static func actionBuildConfiguration(xml: String, action: String) -> String {
+        guard let start = xml.range(of: "<\(action)", options: .caseInsensitive) else { return "" }
+        let fromAction = xml[start.lowerBound...]
+        guard let tagEnd = fromAction.range(of: ">") else { return "" }
+        let openTag = String(fromAction[..<tagEnd.upperBound])
+        guard let regex = try? NSRegularExpression(pattern: #"buildConfiguration\s*=\s*"([^"]+)""#) else { return "" }
+        let range = NSRange(openTag.startIndex..., in: openTag)
+        guard let match = regex.firstMatch(in: openTag, range: range),
+              let capture = Range(match.range(at: 1), in: openTag) else { return "" }
+        return String(openTag[capture])
+    }
+
     static func parseList(_ data: Data) throws -> (String, [String]) {
         let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
         if let project = obj["project"] as? [String: Any], let schemes = project["schemes"] as? [String], !schemes.isEmpty {
@@ -250,14 +344,27 @@ final class XcodePipeline {
     }
 
     static func installedProfiles() -> [ProfileInfo] {
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/MobileDevice/Provisioning Profiles")
-        guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { return [] }
-        return files.compactMap { name -> ProfileInfo? in
-            let lower = name.lowercased()
-            guard lower.hasSuffix(".mobileprovision") || lower.hasSuffix(".provisionprofile") else { return nil }
-            return decodeProfile(dir.appendingPathComponent(name).path)
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dirs = [
+            home.appendingPathComponent("Library/MobileDevice/Provisioning Profiles"),
+            home.appendingPathComponent("Library/Developer/Xcode/UserData/Provisioning Profiles"),
+        ]
+        var seen = Set<String>()
+        var result: [ProfileInfo] = []
+        for dir in dirs {
+            guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { continue }
+            for name in files {
+                let lower = name.lowercased()
+                guard lower.hasSuffix(".mobileprovision") || lower.hasSuffix(".provisionprofile") else { continue }
+                let path = dir.appendingPathComponent(name).path
+                guard let info = decodeProfile(path) else { continue }
+                let key = info.uuid.isEmpty ? path : info.uuid
+                if seen.insert(key).inserted {
+                    result.append(info)
+                }
+            }
         }
+        return result
     }
 
     static func decodeProfile(_ path: String) -> ProfileInfo? {
@@ -305,7 +412,16 @@ final class XcodePipeline {
         } else {
             info.bundleId = appId
         }
-        info.isAppStore = !getTaskAllow && devices.isEmpty && !allDevices
+        if allDevices {
+            info.kind = "enterprise"
+        } else if getTaskAllow {
+            info.kind = "development"
+        } else if !devices.isEmpty {
+            info.kind = "adhoc"
+        } else {
+            info.kind = "appstore"
+        }
+        info.isAppStore = info.kind == "appstore"
         if let exp = obj["ExpirationDate"] as? String {
             info.expired = (ISO8601DateFormatter().date(from: exp) ?? Date.distantFuture) < Date()
         }
@@ -313,17 +429,37 @@ final class XcodePipeline {
         return info
     }
 
-    static func matchProfiles(_ profiles: [ProfileInfo], bundleId: String, teamId: String, specifier: String) -> [ProfileInfo] {
-        profiles.compactMap { raw -> ProfileInfo? in
+    static func preferredProfileKinds(for configuration: String) -> [String] {
+        let c = configuration.lowercased()
+        if c.contains("debug") { return ["development"] }
+        if c.contains("adhoc") || c.contains("ad-hoc") || c.contains("ad_hoc") { return ["adhoc"] }
+        if c.contains("enterprise") { return ["enterprise"] }
+        return ["appstore"]
+    }
+
+    static func matchProfiles(
+        _ profiles: [ProfileInfo],
+        bundleId: String,
+        teamId: String,
+        specifier: String,
+        configuration: String
+    ) -> [ProfileInfo] {
+        let preferred = Set(preferredProfileKinds(for: configuration))
+        let matched: [ProfileInfo] = profiles.compactMap { raw in
             var p = raw
-            if !p.isAppStore || p.expired { return nil }
+            if p.expired { return nil }
             if !teamId.isEmpty && !p.teamId.isEmpty && p.teamId != teamId { return nil }
             if !bundleMatches(p.bundleId, bundleId) { return nil }
             p.match = (!specifier.isEmpty && (p.uuid == specifier || p.name == specifier)) ? "project" : "installed"
             return p
         }
-        .sorted {
+        let narrowed = matched.filter { preferred.contains($0.kind) }
+        let list = narrowed.isEmpty ? matched : narrowed
+        return list.sorted {
             if $0.match != $1.match { return $0.match == "project" }
+            let aPref = preferred.contains($0.kind)
+            let bPref = preferred.contains($1.kind)
+            if aPref != bPref { return aPref }
             return $0.name < $1.name
         }
     }
@@ -338,7 +474,20 @@ final class XcodePipeline {
         return profileBundle == appBundle
     }
 
-    static func exportOptionsPlist(teamId: String, bundleId: String, profile: String) -> String {
+    static func exportMethod(for kind: String) -> String {
+        switch kind {
+        case "development": return "development"
+        case "adhoc": return "ad-hoc"
+        case "enterprise": return "enterprise"
+        default: return "app-store-connect"
+        }
+    }
+
+    static func signingCertificate(for kind: String) -> String {
+        kind == "development" ? "Apple Development" : "Apple Distribution"
+    }
+
+    static func exportOptionsPlist(teamId: String, bundleId: String, profile: String, profileKind: String) -> String {
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
@@ -350,7 +499,7 @@ final class XcodePipeline {
         <plist version="1.0">
         <dict>
         	<key>method</key>
-        	<string>app-store-connect</string>
+        	<string>\(esc(exportMethod(for: profileKind)))</string>
         	<key>destination</key>
         	<string>export</string>
         	<key>signingStyle</key>
@@ -358,7 +507,7 @@ final class XcodePipeline {
         	<key>teamID</key>
         	<string>\(esc(teamId))</string>
         	<key>signingCertificate</key>
-        	<string>Apple Distribution</string>
+        	<string>\(esc(signingCertificate(for: profileKind)))</string>
         	<key>stripSwiftSymbols</key>
         	<true/>
         	<key>provisioningProfiles</key>

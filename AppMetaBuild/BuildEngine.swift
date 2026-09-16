@@ -20,13 +20,24 @@ final class BuildEngine: ObservableObject {
 
     var ready: Bool { inspect?.ready == true }
     var canUpload: Bool { credentials.isComplete }
+    var selectedProfileInfo: ProfileInfo? {
+        inspect?.profiles.first { $0.value == profile }
+    }
+    var canUploadBuild: Bool { canUpload && (selectedProfileInfo?.isAppStore ?? false) }
     var facts: String {
         guard let ins = inspect else { return "" }
         var parts: [String] = []
+        if !ins.configuration.isEmpty { parts.append(ins.configuration) }
         if !ins.bundleId.isEmpty { parts.append("Bundle ID \(ins.bundleId)") }
         if !ins.teamId.isEmpty { parts.append("Team \(ins.teamId)") }
         if !ins.signingStyle.isEmpty { parts.append("\(L10n.t("Signing", "签名")): \(ins.signingStyle)") }
-        if !ins.distributionCerts.isEmpty {
+        if ins.usesDevelopmentSigning {
+            if !ins.developmentCerts.isEmpty {
+                parts.append(L10n.t("Apple Development certificate found", "已找到 Apple Development 证书"))
+            } else {
+                parts.append(L10n.t("No Apple Development certificate in the keychain", "钥匙串里没有 Apple Development 证书"))
+            }
+        } else if !ins.distributionCerts.isEmpty {
             parts.append(L10n.t("Apple Distribution certificate found", "已找到 Apple Distribution 证书"))
         } else {
             parts.append(L10n.t("No Apple Distribution certificate in the keychain", "钥匙串里没有 Apple Distribution 证书"))
@@ -64,6 +75,12 @@ final class BuildEngine: ObservableObject {
         runInspect()
     }
 
+    func handleSchemeChange(_ newScheme: String) {
+        guard inspect != nil, !busy else { return }
+        guard !newScheme.isEmpty, newScheme != inspect?.suggestedScheme else { return }
+        runInspect()
+    }
+
     func runInspect() {
         let path = projectPath.trimmingCharacters(in: .whitespaces)
         guard !path.isEmpty else { return }
@@ -91,8 +108,10 @@ final class BuildEngine: ObservableObject {
 
     func runExport(upload: Bool) {
         guard let ins = inspect else { return }
-        if upload && !canUpload {
-            lastError = L10n.t("Save Key ID, Issuer ID and the .p8 key first.", "请先填写 Key ID、Issuer ID 并选择 .p8。")
+        if upload && !canUploadBuild {
+            lastError = selectedProfileInfo?.isAppStore == false
+                ? L10n.t("App Store Connect upload needs an App Store provisioning profile.", "上传到 App Store Connect 需要 App Store 描述文件。")
+                : L10n.t("Save Key ID, Issuer ID and the .p8 key first.", "请先填写 Key ID、Issuer ID 并选择 .p8。")
             return
         }
         busy = true
@@ -100,15 +119,18 @@ final class BuildEngine: ObservableObject {
         log = ""
         artifact = ""
         let cred = credentials
+        let kind = selectedProfileInfo?.kind ?? ""
         queue.async { [weak self] in
             guard let self else { return }
             do {
                 let ipa = try self.pipeline.archiveAndExport(
                     project: self.projectPath,
                     scheme: self.scheme,
+                    configuration: ins.configuration,
                     teamId: ins.teamId,
                     bundleId: ins.bundleId,
                     profile: self.profile,
+                    profileKind: kind,
                     onLog: { line in DispatchQueue.main.async { self.appendLog(line) } },
                     onStage: { s, m in DispatchQueue.main.async { self.stage = "\(s): \(m)" } }
                 )

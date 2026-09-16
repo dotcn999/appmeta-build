@@ -100,15 +100,19 @@ struct ContentView: View {
     private var inspectCard: some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle(L10n.t("Signing", "签名"),
-                         subtitle: L10n.t("Release scheme and App Store profile. ★ is the one set in Xcode.", "Release scheme 与 App Store 描述文件。★ 表示工程里已指定。"))
+                         subtitle: L10n.t("Bundle ID follows the selected scheme. Profiles are installed on this Mac. ★ is set in Xcode.", "Bundle ID 随所选 Scheme 变化。描述文件来自本机已安装的 Provisioning Profile。★ 表示工程里已指定。"))
             if let ins = engine.inspect {
                 labeledPicker(L10n.t("Scheme", "Scheme"), selection: $engine.scheme, options: ins.schemes)
+                    .disabled(engine.busy)
+                    .onChange(of: engine.scheme) { engine.handleSchemeChange($0) }
                 Picker(L10n.t("Profile", "描述文件"), selection: $engine.profile) {
                     ForEach(ins.profiles) { p in
                         Text(p.displayName).tag(p.value)
                     }
                 }
                 .labelsHidden()
+                .disabled(engine.busy)
+                factRow(L10n.t("Configuration", "配置"), ins.configuration)
                 factRow(L10n.t("Bundle ID", "Bundle ID"), ins.bundleId)
                 factRow("Team", ins.teamId)
                 factRow(L10n.t("Style", "方式"), ins.signingStyle)
@@ -128,16 +132,26 @@ struct ContentView: View {
     }
 
     private var certRow: some View {
-        HStack(alignment: .firstTextBaseline) {
+        let development = engine.inspect?.usesDevelopmentSigning == true
+        let found = development
+            ? (engine.inspect?.developmentCerts.isEmpty == false)
+            : (engine.inspect?.distributionCerts.isEmpty == false)
+        let label: String
+        if found {
+            label = development
+                ? L10n.t("Apple Development found", "已找到 Apple Development")
+                : L10n.t("Apple Distribution found", "已找到 Apple Distribution")
+        } else {
+            label = L10n.t("Not found in Keychain", "钥匙串中没有")
+        }
+        return HStack(alignment: .firstTextBaseline) {
             Text(L10n.t("Certificate", "证书"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(width: 72, alignment: .leading)
-            Text((engine.inspect?.distributionCerts.isEmpty == false)
-                 ? L10n.t("Apple Distribution found", "已找到 Apple Distribution")
-                 : L10n.t("Not found in Keychain", "钥匙串中没有"))
+            Text(label)
                 .font(.caption)
-                .foregroundStyle((engine.inspect?.distributionCerts.isEmpty == false) ? .green : .orange)
+                .foregroundStyle(found ? Color.green : Color.orange)
         }
     }
 
@@ -151,13 +165,13 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(!engine.ready || !engine.canUpload || engine.busy)
+            .disabled(!engine.ready || !engine.canUploadBuild || engine.busy)
 
             HStack(spacing: 8) {
                 Button(L10n.t("Export IPA", "导出 IPA")) { engine.runExport(upload: false) }
                     .disabled(!engine.ready || engine.busy)
                 Button(L10n.t("Upload IPA", "上传 IPA")) { engine.runUpload() }
-                    .disabled(engine.artifact.isEmpty || !engine.canUpload || engine.busy)
+                    .disabled(engine.artifact.isEmpty || !engine.canUploadBuild || engine.busy)
             }
             HStack(spacing: 8) {
                 Button(L10n.t("Cancel", "取消"), role: .destructive) { engine.cancel() }
