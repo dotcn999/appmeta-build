@@ -14,6 +14,7 @@ struct ProfileInfo: Hashable, Identifiable {
     var expired = false
     var match = ""
     var path = ""
+    var certFingerprints: [String] = []
     var displayName: String {
         let star = match == "project" ? "★ " : ""
         let kindLabel: String

@@ -106,6 +106,9 @@ struct ContentView: View {
                     .disabled(engine.busy)
                     .onChange(of: engine.scheme) { engine.handleSchemeChange($0) }
                 Picker(L10n.t("Profile", "描述文件"), selection: $engine.profile) {
+                    if ins.profiles.isEmpty {
+                        Text(L10n.t("No matching profile on this Mac", "本机没有匹配的描述文件")).tag("")
+                    }
                     ForEach(ins.profiles) { p in
                         Text(p.displayName).tag(p.value)
                     }

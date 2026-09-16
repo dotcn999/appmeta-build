@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 final class XcodePipeline {
     private let lock = NSLock()
@@ -26,6 +27,7 @@ final class XcodePipeline {
         var settingsArgs = [
             "/usr/bin/xcodebuild", "-showBuildSettings", "-json",
             "-project", project, "-scheme", res.suggestedScheme,
+            "-destination", "generic/platform=iOS",
         ]
         if !res.configuration.isEmpty {
             settingsArgs += ["-configuration", res.configuration]
@@ -42,13 +44,18 @@ final class XcodePipeline {
                 res.configuration = settings["CONFIGURATION"] ?? ""
             }
         }
+        var specifiers = Self.pbxprojProfileSpecifiers(project)
+        if !res.profileSpecifier.isEmpty { specifiers.insert(res.profileSpecifier, at: 0) }
+        specifiers = Self.uniqueKeepOrder(specifiers)
+        if res.profileSpecifier.isEmpty { res.profileSpecifier = specifiers.first ?? "" }
+        var identityLines: [String] = []
         if let ident = try? runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]) {
             let text = String(data: ident, encoding: .utf8) ?? ""
-            let lines = text.split(separator: "\n").map(String.init)
-            res.distributionCerts = lines.filter {
+            identityLines = text.split(separator: "\n").map(String.init)
+            res.distributionCerts = identityLines.filter {
                 $0.contains("Apple Distribution") || $0.contains("iPhone Distribution")
             }
-            res.developmentCerts = lines.filter {
+            res.developmentCerts = identityLines.filter {
                 $0.contains("Apple Development") || $0.contains("iPhone Developer")
             }
         }
@@ -57,9 +64,21 @@ final class XcodePipeline {
             installed,
             bundleId: res.bundleId,
             teamId: res.teamId,
-            specifier: res.profileSpecifier,
+            specifiers: specifiers,
             configuration: res.configuration
         )
+        for spec in specifiers {
+            if res.profiles.contains(where: { $0.name == spec || $0.uuid == spec }) { continue }
+            var missing = ProfileInfo()
+            missing.name = spec
+            missing.match = "project"
+            missing.kind = res.usesDevelopmentSigning ? "development" : "appstore"
+            res.profiles.insert(missing, at: 0)
+            res.warnings.append(L10n.t(
+                "Project specifies provisioning profile \"\(spec)\", but it is not installed on this Mac.",
+                "工程指定了描述文件 \"\(spec)\"，但本机没有安装这份文件。"
+            ))
+        }
         res.selectedProfile = res.profiles.first
         if res.signingStyle.lowercased() == "automatic" {
             res.warnings.append(L10n.t(
@@ -90,6 +109,31 @@ final class XcodePipeline {
                 res.warnings.append(L10n.t(
                     "No matching App Store provisioning profile. Double-click the .mobileprovision or assign it on this scheme in Xcode.",
                     "没有匹配的 App Store 描述文件。请双击 .mobileprovision，或在 Xcode 的该 scheme 上指定。"
+                ))
+            }
+        }
+        let identity = res.codeSignIdentity.lowercased()
+        if (identity.contains("iphone developer") || identity == "iphone distribution")
+            && (res.developmentCerts.contains(where: { $0.contains("Apple Development") })
+                || res.distributionCerts.contains(where: { $0.contains("Apple Distribution") })) {
+            res.warnings.append(L10n.t(
+                "The project still uses the legacy identity \"\(res.codeSignIdentity)\". Keychain has Apple Development / Distribution; set Signing Certificate in Xcode to match, or the profile will show as not including the cert.",
+                "工程还在用旧的证书名 \"\(res.codeSignIdentity)\"。钥匙串里是 Apple Development / Distribution；请在 Xcode 把 Signing Certificate 改成对应证书，否则会提示描述文件不包含该证书。"
+            ))
+        }
+        if let selected = res.selectedProfile, selected.expired {
+            res.warnings.append(L10n.t(
+                "Provisioning profile \"\(selected.name)\" has expired.",
+                "描述文件 \"\(selected.name)\" 已过期。"
+            ))
+        }
+        if let selected = res.selectedProfile, !selected.certFingerprints.isEmpty {
+            let keychain = Set(Self.identityFingerprints(identityLines))
+            let overlap = selected.certFingerprints.contains { keychain.contains($0) }
+            if !overlap && !keychain.isEmpty {
+                res.warnings.append(L10n.t(
+                    "Provisioning profile \"\(selected.name)\" does not include the signing certificate currently in the keychain. Recreate the profile with this certificate, or pick a certificate that is already in the profile.",
+                    "描述文件 \"\(selected.name)\" 不包含当前钥匙串里的签名证书。请用这张证书重新生成描述文件，或改选描述文件里已有的证书。"
                 ))
             }
         }
@@ -329,18 +373,84 @@ final class XcodePipeline {
         throw BuildError.message(L10n.t("No shared schemes in this project.", "工程里没有 shared scheme。"))
     }
 
+    static func jsonArray(from data: Data) -> [[String: Any]]? {
+        if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] { return arr }
+        guard let text = String(data: data, encoding: .utf8),
+              let idx = text.firstIndex(of: "[") else { return nil }
+        let sliced = String(text[idx...]).data(using: .utf8) ?? data
+        return (try? JSONSerialization.jsonObject(with: sliced)) as? [[String: Any]]
+    }
+
+    static func stringSettings(_ raw: [String: Any]) -> [String: String] {
+        var out: [String: String] = [:]
+        for (key, value) in raw {
+            if let s = value as? String {
+                out[key] = s
+            } else if let arr = value as? [String] {
+                out[key] = arr.joined(separator: " ")
+            } else if let n = value as? NSNumber {
+                out[key] = n.stringValue
+            }
+        }
+        return out
+    }
+
     static func pickSettings(_ data: Data) -> [String: String] {
-        guard let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [:] }
+        guard let arr = jsonArray(from: data) else { return [:] }
         var fallback: [String: String]?
         for entry in arr {
             let target = ((entry["target"] as? String) ?? "").lowercased()
             if target.contains("test") { continue }
-            let settings = (entry["buildSettings"] as? [String: String]) ?? [:]
+            let settings = stringSettings(entry["buildSettings"] as? [String: Any] ?? [:])
             if fallback == nil { fallback = settings }
             let bid = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
             if !bid.isEmpty && !bid.contains("$") { return settings }
         }
         return fallback ?? [:]
+    }
+
+    static func uniqueKeepOrder(_ items: [String]) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for item in items where !item.isEmpty && seen.insert(item).inserted {
+            out.append(item)
+        }
+        return out
+    }
+
+    static func pbxprojProfileSpecifiers(_ project: String) -> [String] {
+        let url = URL(fileURLWithPath: project).appendingPathComponent("project.pbxproj")
+        guard let text = try? String(contentsOf: url, encoding: .utf8),
+              let regex = try? NSRegularExpression(
+                pattern: #"PROVISIONING_PROFILE(?:_SPECIFIER)?(?:\[[^\]]+\])?\s*=\s*(?:"([^"]*)"|([^;]*));"#
+              ) else { return [] }
+        let ns = text as NSString
+        var specs: [String] = []
+        for match in regex.matches(in: text, range: NSRange(location: 0, length: ns.length)) {
+            let quoted = match.range(at: 1).location != NSNotFound ? ns.substring(with: match.range(at: 1)) : ""
+            let bare = match.range(at: 2).location != NSNotFound
+                ? ns.substring(with: match.range(at: 2)).trimmingCharacters(in: .whitespacesAndNewlines)
+                : ""
+            let value = quoted.isEmpty ? bare : quoted
+            if !value.isEmpty { specs.append(value) }
+        }
+        return uniqueKeepOrder(specs)
+    }
+
+    static func identityFingerprints(_ lines: [String]) -> [String] {
+        guard let regex = try? NSRegularExpression(pattern: #"([0-9A-Fa-f]{40})\s+""#) else { return [] }
+        var hashes: [String] = []
+        for line in lines {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = regex.firstMatch(in: line, range: range),
+                  let capture = Range(match.range(at: 1), in: line) else { continue }
+            hashes.append(String(line[capture]).uppercased())
+        }
+        return hashes
+    }
+
+    static func sha1Hex(_ data: Data) -> String {
+        Insecure.SHA1.hash(data: data).map { String(format: "%02X", $0) }.joined()
     }
 
     static func installedProfiles() -> [ProfileInfo] {
@@ -377,30 +487,17 @@ final class XcodePipeline {
         try? cms.run()
         let xml = cmsOut.fileHandleForReading.readDataToEndOfFile()
         cms.waitUntilExit()
-        guard cms.terminationStatus == 0 else { return nil }
-        let pl = Process()
-        pl.executableURL = URL(fileURLWithPath: "/usr/bin/plutil")
-        pl.arguments = ["-convert", "json", "-o", "-", "-"]
-        let plIn = Pipe()
-        let plOut = Pipe()
-        pl.standardInput = plIn
-        pl.standardOutput = plOut
-        pl.standardError = Pipe()
-        try? pl.run()
-        plIn.fileHandleForWriting.write(xml)
-        try? plIn.fileHandleForWriting.close()
-        let json = plOut.fileHandleForReading.readDataToEndOfFile()
-        pl.waitUntilExit()
-        guard pl.terminationStatus == 0,
-              let obj = try? JSONSerialization.jsonObject(with: json) as? [String: Any] else { return nil }
+        guard cms.terminationStatus == 0,
+              let obj = try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil) as? [String: Any]
+        else { return nil }
         let entitlements = obj["Entitlements"] as? [String: Any] ?? [:]
         let appId = (entitlements["application-identifier"] as? String)
             ?? (entitlements["com.apple.application-identifier"] as? String)
             ?? ""
-        let getTaskAllow = entitlements["get-task-allow"] as? Bool ?? false
+        let getTaskAllow = boolValue(entitlements["get-task-allow"])
         let devices = obj["ProvisionedDevices"] as? [Any] ?? []
-        let allDevices = obj["ProvisionsAllDevices"] as? Bool ?? false
-        let teams = obj["TeamIdentifier"] as? [String] ?? []
+        let allDevices = boolValue(obj["ProvisionsAllDevices"])
+        let teams = (obj["TeamIdentifier"] as? [String]) ?? []
         var info = ProfileInfo()
         info.uuid = obj["UUID"] as? String ?? ""
         info.name = obj["Name"] as? String ?? ""
@@ -422,11 +519,23 @@ final class XcodePipeline {
             info.kind = "appstore"
         }
         info.isAppStore = info.kind == "appstore"
-        if let exp = obj["ExpirationDate"] as? String {
+        if let exp = obj["ExpirationDate"] as? Date {
+            info.expired = exp < Date()
+        } else if let exp = obj["ExpirationDate"] as? String {
             info.expired = (ISO8601DateFormatter().date(from: exp) ?? Date.distantFuture) < Date()
+        }
+        if let certs = obj["DeveloperCertificates"] as? [Data] {
+            info.certFingerprints = certs.map(sha1Hex)
         }
         info.path = path
         return info
+    }
+
+    static func boolValue(_ any: Any?) -> Bool {
+        if let b = any as? Bool { return b }
+        if let n = any as? NSNumber { return n.boolValue }
+        if let s = any as? String { return ["true", "YES", "1"].contains(s) }
+        return false
     }
 
     static func preferredProfileKinds(for configuration: String) -> [String] {
@@ -441,27 +550,41 @@ final class XcodePipeline {
         _ profiles: [ProfileInfo],
         bundleId: String,
         teamId: String,
-        specifier: String,
+        specifiers: [String],
         configuration: String
     ) -> [ProfileInfo] {
         let preferred = Set(preferredProfileKinds(for: configuration))
+        let specSet = Set(specifiers)
+        func isSpecified(_ p: ProfileInfo) -> Bool {
+            specSet.contains(p.name) || specSet.contains(p.uuid)
+        }
         let matched: [ProfileInfo] = profiles.compactMap { raw in
             var p = raw
+            let specified = isSpecified(p)
+            if specified {
+                p.match = "project"
+                return p
+            }
             if p.expired { return nil }
             if !teamId.isEmpty && !p.teamId.isEmpty && p.teamId != teamId { return nil }
             if !bundleMatches(p.bundleId, bundleId) { return nil }
-            p.match = (!specifier.isEmpty && (p.uuid == specifier || p.name == specifier)) ? "project" : "installed"
+            p.match = "installed"
             return p
         }
-        let narrowed = matched.filter { preferred.contains($0.kind) }
-        let list = narrowed.isEmpty ? matched : narrowed
-        return list.sorted {
+        // Project-specified profiles always stay. Kind filter only hides extras.
+        let specified = matched.filter { $0.match == "project" }
+        let rest = matched.filter { $0.match != "project" }
+        let narrowedRest = rest.filter { preferred.contains($0.kind) }
+        let list = (specified + (narrowedRest.isEmpty ? rest : narrowedRest)).sorted {
             if $0.match != $1.match { return $0.match == "project" }
+            if $0.expired != $1.expired { return !$0.expired }
             let aPref = preferred.contains($0.kind)
             let bPref = preferred.contains($1.kind)
             if aPref != bPref { return aPref }
             return $0.name < $1.name
         }
+        var seen = Set<String>()
+        return list.filter { seen.insert($0.value).inserted }
     }
 
     static func bundleMatches(_ profileBundle: String, _ appBundle: String) -> Bool {
