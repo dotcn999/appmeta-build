@@ -13,6 +13,7 @@
 		A10000000000000000000024 /* BuildEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000004 /* BuildEngine.swift */; };
 		A10000000000000000000025 /* CredentialsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000005 /* CredentialsStore.swift */; };
 		A10000000000000000000026 /* XcodePipeline.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000006 /* XcodePipeline.swift */; };
+		A10000000000000000000028 /* AppearanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000A /* AppearanceStore.swift */; };
 		A10000000000000000000027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* Assets.xcassets */; };
 /* End PBXBuildFile section */
 
@@ -23,6 +24,7 @@
 		A10000000000000000000004 /* BuildEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildEngine.swift; sourceTree = "<group>"; };
 		A10000000000000000000005 /* CredentialsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CredentialsStore.swift; sourceTree = "<group>"; };
 		A10000000000000000000006 /* XcodePipeline.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = XcodePipeline.swift; sourceTree = "<group>"; };
+		A1000000000000000000000A /* AppearanceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppearanceStore.swift; sourceTree = "<group>"; };
 		A10000000000000000000007 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000008 /* AppMetaBuild.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AppMetaBuild.entitlements; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -57,6 +59,7 @@
 				A10000000000000000000004 /* BuildEngine.swift */,
 				A10000000000000000000005 /* CredentialsStore.swift */,
 				A10000000000000000000006 /* XcodePipeline.swift */,
+				A1000000000000000000000A /* AppearanceStore.swift */,
 				A10000000000000000000007 /* Assets.xcassets */,
 				A10000000000000000000008 /* AppMetaBuild.entitlements */,
 				A10000000000000000000009 /* Info.plist */,
@@ -148,6 +151,7 @@
 				A10000000000000000000024 /* BuildEngine.swift in Sources */,
 				A10000000000000000000025 /* CredentialsStore.swift in Sources */,
 				A10000000000000000000026 /* XcodePipeline.swift in Sources */,
+				A10000000000000000000028 /* AppearanceStore.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

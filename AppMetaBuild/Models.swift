@@ -45,11 +45,6 @@ struct Credentials: Codable, Equatable {
     }
 }
 
-enum L10n {
-    static var zh: Bool { Locale.current.language.languageCode?.identifier == "zh" }
-    static func t(_ en: String, _ zhHans: String) -> String { zh ? zhHans : en }
-}
-
 enum BuildError: LocalizedError {
     case message(String)
     var errorDescription: String? {
