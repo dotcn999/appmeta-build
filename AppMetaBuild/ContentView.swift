@@ -159,7 +159,7 @@ struct ContentView: View {
     }
 
     private var actionsCard: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 10) {
             Button {
                 engine.runExport(upload: true)
             } label: {
@@ -171,20 +171,39 @@ struct ContentView: View {
             .disabled(!engine.ready || !engine.canUploadBuild || engine.busy)
 
             HStack(spacing: 8) {
-                Button(L10n.t("Export IPA", "导出 IPA")) { engine.runExport(upload: false) }
-                    .disabled(!engine.ready || engine.busy)
-                Button(L10n.t("Upload IPA", "上传 IPA")) { engine.runUpload() }
-                    .disabled(engine.artifact.isEmpty || !engine.canUploadBuild || engine.busy)
+                actionGridButton(L10n.t("Export IPA", "导出 IPA"), disabled: !engine.ready || engine.busy) {
+                    engine.runExport(upload: false)
+                }
+                actionGridButton(L10n.t("Upload IPA", "上传 IPA"), disabled: engine.artifact.isEmpty || !engine.canUploadBuild || engine.busy) {
+                    engine.runUpload()
+                }
             }
             HStack(spacing: 8) {
-                Button(L10n.t("Cancel", "取消"), role: .destructive) { engine.cancel() }
-                    .disabled(!engine.busy)
-                Button(L10n.t("Show in Finder", "在 Finder 中显示")) { engine.revealArtifact() }
-                    .disabled(engine.artifact.isEmpty)
+                actionGridButton(L10n.t("Cancel", "取消"), role: .destructive, disabled: !engine.busy) {
+                    engine.cancel()
+                }
+                actionGridButton(L10n.t("Show in Finder", "在 Finder 中显示"), disabled: engine.artifact.isEmpty) {
+                    engine.revealArtifact()
+                }
             }
         }
         .padding(12)
         .background(cardBackground)
+    }
+
+    private func actionGridButton(
+        _ title: String,
+        role: ButtonRole? = nil,
+        disabled: Bool,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(role: role, action: action) {
+            Text(title)
+                .frame(maxWidth: .infinity)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.regular)
+        .disabled(disabled)
     }
 
     private var statusCard: some View {
