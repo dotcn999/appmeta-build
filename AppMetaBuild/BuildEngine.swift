@@ -24,7 +24,15 @@ final class BuildEngine: ObservableObject {
     private var logLines: [String] = []
     static let maxLogLines = 4000
 
-    var ready: Bool { inspect?.ready == true }
+    var assessment: SigningAssessment {
+        guard let ins = inspect else { return SigningAssessment() }
+        return XcodePipeline.assess(inspect: ins, profileValue: profile, currentPath: projectPath)
+    }
+    var profileGroups: [ProfileGroup] {
+        guard let ins = inspect else { return [] }
+        return XcodePipeline.profileGroups(in: ins.profiles, configuration: ins.configuration)
+    }
+    var ready: Bool { assessment.ready }
     var canUpload: Bool { credentials.isComplete }
     var selectedProfileInfo: ProfileInfo? {
         inspect?.profiles.first { $0.value == profile }
@@ -37,16 +45,12 @@ final class BuildEngine: ObservableObject {
         if !ins.bundleId.isEmpty { parts.append("Bundle ID \(ins.bundleId)") }
         if !ins.teamId.isEmpty { parts.append("Team \(ins.teamId)") }
         if !ins.signingStyle.isEmpty { parts.append("\(L10n.t("Signing", "签名")): \(ins.signingStyle)") }
-        if ins.usesDevelopmentSigning {
-            if !ins.developmentCerts.isEmpty {
-                parts.append(L10n.t("Apple Development certificate found", "已找到 Apple Development 证书"))
-            } else {
-                parts.append(L10n.t("No Apple Development certificate in the keychain", "钥匙串里没有 Apple Development 证书"))
-            }
-        } else if !ins.distributionCerts.isEmpty {
-            parts.append(L10n.t("Apple Distribution certificate found", "已找到 Apple Distribution 证书"))
+        if assessment.certificateFound {
+            parts.append(assessment.identityName)
+        } else if assessment.expectsDevelopment {
+            parts.append(L10n.t("No matching Apple Development certificate", "没有匹配的 Apple Development 证书"))
         } else {
-            parts.append(L10n.t("No Apple Distribution certificate in the keychain", "钥匙串里没有 Apple Distribution 证书"))
+            parts.append(L10n.t("No matching Apple Distribution certificate", "没有匹配的 Apple Distribution 证书"))
         }
         return parts.joined(separator: " · ")
     }
@@ -95,6 +99,9 @@ final class BuildEngine: ObservableObject {
         let path = projectPath.trimmingCharacters(in: .whitespaces)
         guard !path.isEmpty, !busy else { return }
         let selectedScheme = scheme
+        inspect = nil
+        artifact = ""
+        logFile = ""
         beginWork(clearLog: false, clearArtifact: false)
         let pipeline = self.pipeline
         pipeline.prepareForNewOperation()
@@ -103,6 +110,7 @@ final class BuildEngine: ObservableObject {
                 let result = try pipeline.inspect(projectPath: path, scheme: selectedScheme)
                 await MainActor.run { [weak self] in
                     guard let self else { return }
+                    self.projectPath = result.projectPath
                     self.inspect = result
                     self.scheme = result.suggestedScheme
                     self.profile = result.selectedProfile?.value ?? ""
@@ -118,6 +126,11 @@ final class BuildEngine: ObservableObject {
 
     func runExport(upload: Bool) {
         guard let ins = inspect, !busy else { return }
+        let signing = assessment
+        guard signing.ready else {
+            lastError = signing.warnings.first ?? L10n.t("Inspect the project again before exporting.", "请重新识别工程后再导出。")
+            return
+        }
         if upload && !canUploadBuild {
             lastError = selectedProfileInfo?.isAppStore == false
                 ? L10n.t("App Store Connect upload needs an App Store provisioning profile.", "上传到 App Store Connect 需要 App Store 描述文件。")
@@ -132,6 +145,7 @@ final class BuildEngine: ObservableObject {
             bundleId: ins.bundleId,
             profile: profile,
             profileKind: selectedProfileInfo?.kind ?? "",
+            signingIdentity: signing.identityName,
             upload: upload,
             credentials: credentials
         )
@@ -149,6 +163,7 @@ final class BuildEngine: ObservableObject {
                     bundleId: request.bundleId,
                     profile: request.profile,
                     profileKind: request.profileKind,
+                    signingIdentity: request.signingIdentity,
                     onLog: sink.log,
                     onStage: sink.stage
                 )
@@ -287,6 +302,7 @@ private struct ExportRequest: Sendable {
     var bundleId: String
     var profile: String
     var profileKind: String
+    var signingIdentity: String
     var upload: Bool
     var credentials: Credentials
 }

@@ -69,12 +69,9 @@ final class XcodePipeline: @unchecked Sendable {
             let ident = try runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"])
             let text = String(data: ident, encoding: .utf8) ?? ""
             identityLines = text.split(separator: "\n").map(String.init)
-            res.distributionCerts = identityLines.filter {
-                $0.contains("Apple Distribution") || $0.contains("iPhone Distribution")
-            }
-            res.developmentCerts = identityLines.filter {
-                $0.contains("Apple Development") || $0.contains("iPhone Developer")
-            }
+            res.identities = Self.parseIdentities(identityLines)
+            res.distributionCerts = res.identities.filter { $0.kind == "distribution" }.map(\.line)
+            res.developmentCerts = res.identities.filter { $0.kind == "development" }.map(\.line)
         } catch BuildError.cancelled {
             throw BuildError.cancelled
         } catch {
@@ -85,81 +82,19 @@ final class XcodePipeline: @unchecked Sendable {
             installed,
             bundleId: res.bundleId,
             teamId: res.teamId,
-            specifiers: specifiers,
+            specifier: res.profileSpecifier,
             configuration: res.configuration
         )
-        for spec in specifiers {
-            if res.profiles.contains(where: { $0.name == spec || $0.uuid == spec }) { continue }
-            var missing = ProfileInfo()
-            missing.name = spec
-            missing.match = "project"
-            missing.kind = res.usesDevelopmentSigning ? "development" : "appstore"
-            res.profiles.insert(missing, at: 0)
-            res.warnings.append(L10n.t(
-                "Project specifies provisioning profile \"\(spec)\", but it is not installed on this Mac.",
-                "工程指定了描述文件 \"\(spec)\"，但本机没有安装这份文件。"
-            ))
-        }
-        res.selectedProfile = res.profiles.first
-        if res.signingStyle.lowercased() == "automatic" {
-            res.warnings.append(L10n.t(
-                "Signing style is Automatic. This app exports with manual signing; set the scheme to Manual in Xcode.",
-                "签名方式是 Automatic。本应用按手动签名导出；请在 Xcode 把该 scheme 设为 Manual。"
-            ))
-        }
-        if res.usesDevelopmentSigning {
-            if res.developmentCerts.isEmpty {
-                res.warnings.append(L10n.t(
-                    "No Apple Development certificate in the keychain. Import it in Xcode or Keychain Access.",
-                    "钥匙串里没有 Apple Development 证书。请在 Xcode 或钥匙串中导入。"
-                ))
-            }
-        } else if res.distributionCerts.isEmpty {
-            res.warnings.append(L10n.t(
-                "No Apple Distribution certificate in the keychain. Import it in Xcode or Keychain Access.",
-                "钥匙串里没有 Apple Distribution 证书。请在 Xcode 或钥匙串中导入。"
-            ))
-        }
-        if res.selectedProfile == nil {
-            if res.usesDevelopmentSigning {
-                res.warnings.append(L10n.t(
-                    "No matching Development provisioning profile. Double-click the .mobileprovision or assign it on this scheme in Xcode.",
-                    "没有匹配的开发描述文件。请双击 .mobileprovision，或在 Xcode 的该 scheme 上指定。"
-                ))
-            } else {
-                res.warnings.append(L10n.t(
-                    "No matching App Store provisioning profile. Double-click the .mobileprovision or assign it on this scheme in Xcode.",
-                    "没有匹配的 App Store 描述文件。请双击 .mobileprovision，或在 Xcode 的该 scheme 上指定。"
-                ))
-            }
-        }
-        let identity = res.codeSignIdentity.lowercased()
-        if (identity.contains("iphone developer") || identity == "iphone distribution")
-            && (res.developmentCerts.contains(where: { $0.contains("Apple Development") })
-                || res.distributionCerts.contains(where: { $0.contains("Apple Distribution") })) {
-            res.warnings.append(L10n.t(
-                "The project still uses the legacy identity \"\(res.codeSignIdentity)\". Keychain has Apple Development / Distribution; set Signing Certificate in Xcode to match, or the profile will show as not including the cert.",
-                "工程还在用旧的证书名 \"\(res.codeSignIdentity)\"。钥匙串里是 Apple Development / Distribution；请在 Xcode 把 Signing Certificate 改成对应证书，否则会提示描述文件不包含该证书。"
-            ))
-        }
-        if let selected = res.selectedProfile, selected.expired {
-            res.warnings.append(L10n.t(
-                "Provisioning profile \"\(selected.name)\" has expired.",
-                "描述文件 \"\(selected.name)\" 已过期。"
-            ))
-        }
-        if let selected = res.selectedProfile, !selected.certFingerprints.isEmpty {
-            let keychain = Set(Self.identityFingerprints(identityLines))
-            let overlap = selected.certFingerprints.contains { keychain.contains($0) }
-            if !overlap && !keychain.isEmpty {
-                res.warnings.append(L10n.t(
-                    "Provisioning profile \"\(selected.name)\" does not include the signing certificate currently in the keychain. Recreate the profile with this certificate, or pick a certificate that is already in the profile.",
-                    "描述文件 \"\(selected.name)\" 不包含当前钥匙串里的签名证书。请用这张证书重新生成描述文件，或改选描述文件里已有的证书。"
-                ))
-            }
-        }
-        let hasCert = res.usesDevelopmentSigning ? !res.developmentCerts.isEmpty : !res.distributionCerts.isEmpty
-        res.ready = !res.bundleId.isEmpty && !res.teamId.isEmpty && res.selectedProfile != nil && hasCert
+        res.selectedProfile = Self.defaultProfile(
+            in: res.profiles,
+            specifier: res.profileSpecifier,
+            configuration: res.configuration,
+            identities: res.identities,
+            bundleId: res.bundleId
+        )
+        let assessment = Self.assess(inspect: res, profileValue: res.selectedProfile?.value ?? "", currentPath: res.projectPath)
+        res.warnings = assessment.warnings
+        res.ready = assessment.ready
         return res
     }
 
@@ -171,6 +106,7 @@ final class XcodePipeline: @unchecked Sendable {
         bundleId: String,
         profile: String,
         profileKind: String,
+        signingIdentity: String,
         onLog: @escaping (String) -> Void,
         onStage: @escaping (String, String) -> Void
     ) throws -> ArchiveProduct {
@@ -187,8 +123,13 @@ final class XcodePipeline: @unchecked Sendable {
         let logURL = outDir.appendingPathComponent("build.log")
         let archivePath = outDir.appendingPathComponent("\(scheme).xcarchive").path
         let plistPath = outDir.appendingPathComponent("ExportOptions.plist").path
-        try Self.exportOptionsPlist(teamId: teamId, bundleId: bundleId, profile: profile, profileKind: profileKind)
-            .write(toFile: plistPath, atomically: true, encoding: .utf8)
+        try Self.exportOptionsPlist(
+            teamId: teamId,
+            bundleId: bundleId,
+            profile: profile,
+            profileKind: profileKind,
+            signingCertificate: signingIdentity
+        ).write(toFile: plistPath, atomically: true, encoding: .utf8)
 
         let logger = LineLog(url: logURL)
         defer { logger?.close() }
@@ -197,17 +138,25 @@ final class XcodePipeline: @unchecked Sendable {
             onLog(line)
         }
         emit("Log: \(logURL.path)")
+        emit("Team \(teamId)")
+        emit("Identity \(signingIdentity)")
+        emit("Profile \(profile)")
         onStage("archive", L10n.t("Archiving \(config). This can take several minutes.", "正在 Archive \(config)，可能需要几分钟。"))
         emit("xcodebuild archive -project \(proj) -scheme \(scheme) -configuration \(config)")
         let workDirectory = URL(fileURLWithPath: proj).deletingLastPathComponent().path
-        try runStreaming(onLog: emit, arguments: [
+        var archiveArguments = [
             "/usr/bin/xcodebuild", "archive",
             "-project", proj,
             "-scheme", scheme,
             "-configuration", config,
             "-destination", "generic/platform=iOS",
             "-archivePath", archivePath,
-        ], directory: workDirectory)
+            "CODE_SIGN_STYLE=Manual",
+        ]
+        if !teamId.isEmpty { archiveArguments.append("DEVELOPMENT_TEAM=\(teamId)") }
+        if !profile.isEmpty { archiveArguments.append("PROVISIONING_PROFILE_SPECIFIER=\(profile)") }
+        if !signingIdentity.isEmpty { archiveArguments.append("CODE_SIGN_IDENTITY=\(signingIdentity)") }
+        try runStreaming(onLog: emit, arguments: archiveArguments, directory: workDirectory)
         try checkCancelled()
 
         onStage("export", L10n.t("Exporting a manually signed IPA.", "正在导出手动签名 IPA。"))
@@ -312,33 +261,10 @@ final class XcodePipeline: @unchecked Sendable {
         schemes.first { $0.lowercased().contains("release") } ?? schemes.first ?? ""
     }
 
-    static func inferredConfigurationName(_ scheme: String) -> String {
-        let n = scheme.lowercased()
-        if n.contains("debug") || n.contains("develop") || n.hasSuffix("-dev") || n.hasSuffix("_dev") || n.contains(".dev") {
-            return "Debug"
-        }
-        if n.contains("release") || n.contains("appstore") || n.contains("app-store") || n.contains("distribution") || n.contains("prod") {
-            return "Release"
-        }
-        return ""
-    }
-
     static func resolveConfiguration(project: String, scheme: String) -> String {
-        let inferred = inferredConfigurationName(scheme)
-        guard let xml = schemeXML(project: project, scheme: scheme) else {
-            return inferred.isEmpty ? "Release" : inferred
-        }
-        let launch = actionBuildConfiguration(xml: xml, action: "LaunchAction")
+        guard let xml = schemeXML(project: project, scheme: scheme) else { return "Release" }
         let archive = actionBuildConfiguration(xml: xml, action: "ArchiveAction")
-        if inferred == "Debug" {
-            return launch.isEmpty ? "Debug" : launch
-        }
-        if inferred == "Release" {
-            return archive.isEmpty ? "Release" : archive
-        }
-        if !archive.isEmpty { return archive }
-        if !launch.isEmpty { return launch }
-        return "Release"
+        return archive.isEmpty ? "Release" : archive
     }
 
     static func schemeXML(project: String, scheme: String) -> String? {
@@ -399,18 +325,41 @@ final class XcodePipeline: @unchecked Sendable {
         return out
     }
 
+    static func isResolvedBundleID(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.contains("$"), !trimmed.contains(" ") else { return false }
+        let parts = trimmed.split(separator: ".")
+        return parts.count >= 2 && parts.allSatisfy { !$0.isEmpty }
+    }
+
+    static func isResolvedTeamID(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.count == 10, !trimmed.contains("$") else { return false }
+        return trimmed.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+
+    static func sameProjectPath(_ lhs: String, _ rhs: String) -> Bool {
+        func normalize(_ path: String) -> String {
+            let expanded = (path as NSString).expandingTildeInPath
+            return URL(fileURLWithPath: expanded).standardizedFileURL.path
+        }
+        return normalize(lhs) == normalize(rhs)
+    }
+
     static func pickSettings(_ data: Data) -> [String: String] {
         guard let arr = jsonArray(from: data) else { return [:] }
-        var fallback: [String: String]?
+        var resolved: [[String: String]] = []
         for entry in arr {
             let target = ((entry["target"] as? String) ?? "").lowercased()
             if target.contains("test") { continue }
             let settings = stringSettings(entry["buildSettings"] as? [String: Any] ?? [:])
-            if fallback == nil { fallback = settings }
-            let bid = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
-            if !bid.isEmpty && !bid.contains("$") { return settings }
+            guard isResolvedBundleID(settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? "") else { continue }
+            resolved.append(settings)
         }
-        return fallback ?? [:]
+        if let app = resolved.first(where: { $0["PRODUCT_TYPE"] == "com.apple.product-type.application" }) {
+            return app
+        }
+        return resolved.first ?? [:]
     }
 
     static func uniqueKeepOrder(_ items: [String]) -> [String] {
@@ -565,8 +514,17 @@ final class XcodePipeline: @unchecked Sendable {
         if let certs = obj["DeveloperCertificates"] as? [Data] {
             info.certFingerprints = certs.map(sha1Hex)
         }
+        info.platforms = platformNames(obj["Platform"])
+        info.platformKnown = !info.platforms.isEmpty
         info.path = path
         return info
+    }
+
+    static func platformNames(_ raw: Any?) -> [String] {
+        if let values = raw as? [String] { return values }
+        if let values = raw as? [Any] { return values.compactMap { $0 as? String } }
+        if let value = raw as? String, !value.isEmpty { return [value] }
+        return []
     }
 
     static func boolValue(_ any: Any?) -> Bool {
@@ -588,41 +546,224 @@ final class XcodePipeline: @unchecked Sendable {
         _ profiles: [ProfileInfo],
         bundleId: String,
         teamId: String,
-        specifiers: [String],
+        specifier: String,
         configuration: String
     ) -> [ProfileInfo] {
         let preferred = Set(preferredProfileKinds(for: configuration))
-        let specSet = Set(specifiers)
-        func isSpecified(_ p: ProfileInfo) -> Bool {
-            specSet.contains(p.name) || specSet.contains(p.uuid)
-        }
         let matched: [ProfileInfo] = profiles.compactMap { raw in
-            var p = raw
-            let specified = isSpecified(p)
+            var profile = raw
+            if profile.platformKnown && !profile.supportsIOS { return nil }
+            if !teamId.isEmpty && !profile.teamId.isEmpty && profile.teamId != teamId { return nil }
+            let specified = !specifier.isEmpty && (profile.name == specifier || profile.uuid == specifier)
             if specified {
-                p.match = "project"
-                return p
+                profile.match = "project"
+                return profile
             }
-            if p.expired { return nil }
-            if !teamId.isEmpty && !p.teamId.isEmpty && p.teamId != teamId { return nil }
-            if !bundleMatches(p.bundleId, bundleId) { return nil }
-            p.match = "installed"
-            return p
+            if !bundleMatches(profile.bundleId, bundleId) { return nil }
+            profile.match = "installed"
+            return profile
         }
-        // Project-specified profiles always stay. Kind filter only hides extras.
-        let specified = matched.filter { $0.match == "project" }
-        let rest = matched.filter { $0.match != "project" }
-        let narrowedRest = rest.filter { preferred.contains($0.kind) }
-        let list = (specified + (narrowedRest.isEmpty ? rest : narrowedRest)).sorted {
-            if $0.match != $1.match { return $0.match == "project" }
-            if $0.expired != $1.expired { return !$0.expired }
-            let aPref = preferred.contains($0.kind)
-            let bPref = preferred.contains($1.kind)
-            if aPref != bPref { return aPref }
-            return $0.name < $1.name
+        var list = matched
+        if !specifier.isEmpty && !list.contains(where: { $0.name == specifier || $0.uuid == specifier }) {
+            var missing = ProfileInfo()
+            missing.name = specifier
+            missing.match = "project"
+            list.append(missing)
+        }
+        list.sort { lhs, rhs in
+            if lhs.installed != rhs.installed { return lhs.installed }
+            if lhs.expired != rhs.expired { return !lhs.expired }
+            let leftPreferred = preferred.contains(lhs.kind)
+            let rightPreferred = preferred.contains(rhs.kind)
+            if leftPreferred != rightPreferred { return leftPreferred }
+            if lhs.kind != rhs.kind { return lhs.kind < rhs.kind }
+            return lhs.name < rhs.name
         }
         var seen = Set<String>()
-        return list.filter { seen.insert($0.value).inserted }
+        return list.filter { seen.insert($0.uuid.isEmpty ? $0.value : $0.uuid).inserted }
+    }
+
+    static func defaultProfile(
+        in profiles: [ProfileInfo],
+        specifier: String,
+        configuration: String,
+        identities: [SigningIdentity],
+        bundleId: String
+    ) -> ProfileInfo? {
+        let preferred = Set(preferredProfileKinds(for: configuration))
+        func usable(_ profile: ProfileInfo) -> Bool {
+            guard profile.installed, !profile.expired, profile.supportsIOS else { return false }
+            guard bundleMatches(profile.bundleId, bundleId) else { return false }
+            return matchingIdentity(profile: profile, identities: identities) != nil
+        }
+        if let named = profiles.first(where: { ($0.name == specifier || $0.uuid == specifier) && usable($0) }) {
+            return named
+        }
+        if let preferredMatch = profiles.first(where: { preferred.contains($0.kind) && usable($0) }) {
+            return preferredMatch
+        }
+        return profiles.first(where: usable)
+    }
+
+    static func expectedIdentityKind(for profileKind: String) -> String {
+        profileKind == "development" ? "development" : "distribution"
+    }
+
+    static func matchingIdentity(profile: ProfileInfo, identities: [SigningIdentity]) -> SigningIdentity? {
+        let expected = expectedIdentityKind(for: profile.kind)
+        return identities.first {
+            $0.kind == expected && profile.certFingerprints.contains($0.fingerprint)
+        }
+    }
+
+    static func parseIdentities(_ lines: [String]) -> [SigningIdentity] {
+        guard let regex = try? NSRegularExpression(pattern: #"([0-9A-Fa-f]{40})\s+"([^"]+)""#) else { return [] }
+        var identities: [SigningIdentity] = []
+        for line in lines {
+            let range = NSRange(line.startIndex..., in: line)
+            guard let match = regex.firstMatch(in: line, range: range),
+                  let hashRange = Range(match.range(at: 1), in: line),
+                  let nameRange = Range(match.range(at: 2), in: line) else { continue }
+            let name = String(line[nameRange])
+            guard let kind = identityKind(name: name) else { continue }
+            identities.append(SigningIdentity(
+                fingerprint: String(line[hashRange]).uppercased(),
+                name: name,
+                kind: kind,
+                line: line
+            ))
+        }
+        return identities
+    }
+
+    static func identityKind(name: String) -> String? {
+        let value = name.lowercased()
+        if value.hasPrefix("iphone developer") || value.hasPrefix("apple development") || value.hasPrefix("ios development") {
+            return "development"
+        }
+        if value.hasPrefix("iphone distribution") || value.hasPrefix("apple distribution") || value.hasPrefix("ios distribution") {
+            return "distribution"
+        }
+        return nil
+    }
+
+    static func assess(inspect: InspectResult, profileValue: String, currentPath: String) -> SigningAssessment {
+        var result = SigningAssessment()
+        if !sameProjectPath(currentPath, inspect.projectPath) {
+            result.warnings.append(L10n.t(
+                "The project path changed. Inspect it again before archiving.",
+                "工程路径已改变，请重新识别后再 Archive。"
+            ))
+            return result
+        }
+        if !isResolvedBundleID(inspect.bundleId) {
+            result.warnings.append(inspect.bundleId.isEmpty
+                ? L10n.t("No expanded Bundle ID was found for this scheme.", "这个 scheme 没有读到已展开的 Bundle ID。")
+                : L10n.t("Bundle ID is not expanded: \(inspect.bundleId)", "Bundle ID 没有展开：\(inspect.bundleId)"))
+        }
+        if !isResolvedTeamID(inspect.teamId) {
+            result.warnings.append(inspect.teamId.isEmpty
+                ? L10n.t("No expanded Team ID was found for this scheme.", "这个 scheme 没有读到已展开的 Team ID。")
+                : L10n.t("Team ID is not expanded: \(inspect.teamId)", "Team ID 没有展开：\(inspect.teamId)"))
+        }
+        guard let profile = inspect.profiles.first(where: { $0.value == profileValue }) else {
+            result.warnings.append(L10n.t(
+                "No matching provisioning profile is installed for this Bundle ID.",
+                "本机没有和这个 Bundle ID 匹配的描述文件。"
+            ))
+            return result
+        }
+        result.expectsDevelopment = profile.kind == "development"
+        if !profile.installed {
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" is named by the project but is not installed on this Mac.",
+                "工程指定了描述文件 \"\(profile.name)\"，但本机没有安装。"
+            ))
+        } else if profile.expired {
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" has expired.",
+                "描述文件 \"\(profile.name)\" 已过期。"
+            ))
+        } else if !profile.platformKnown {
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" does not say which platform it is for.",
+                "描述文件 \"\(profile.name)\" 没有标明平台。"
+            ))
+        } else if !profile.supportsIOS {
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" is not an iOS profile.",
+                "描述文件 \"\(profile.name)\" 不是 iOS 描述文件。"
+            ))
+        }
+        if let identity = matchingIdentity(profile: profile, identities: inspect.identities) {
+            result.identityName = identity.name
+            result.certificateFound = true
+        } else if profile.installed {
+            let expected = result.expectsDevelopment
+                ? L10n.t("Apple Development", "Apple Development")
+                : L10n.t("Apple Distribution", "Apple Distribution")
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" does not include a \(expected) certificate from this keychain.",
+                "描述文件 \"\(profile.name)\" 不包含本机钥匙串里的 \(expected) 证书。"
+            ))
+        }
+        if let legacy = legacyIdentityWarning(projectIdentity: inspect.codeSignIdentity, expectsDevelopment: result.expectsDevelopment) {
+            result.warnings.append(legacy)
+        }
+        if inspect.signingStyle.lowercased() == "automatic" {
+            result.warnings.append(L10n.t(
+                "The project uses Automatic signing. Archive will pass manual signing on the command line and will not edit the project.",
+                "工程使用 Automatic 签名。Archive 会在命令行改用手动签名，不会修改工程文件。"
+            ))
+        }
+        let bundleAligned = bundleMatches(profile.bundleId, inspect.bundleId)
+        if profile.installed && isResolvedBundleID(inspect.bundleId) && !bundleAligned {
+            result.warnings.append(L10n.t(
+                "Provisioning profile \"\(profile.name)\" does not match Bundle ID \(inspect.bundleId).",
+                "描述文件 \"\(profile.name)\" 和 Bundle ID \(inspect.bundleId) 不匹配。"
+            ))
+        }
+        result.ready = isResolvedBundleID(inspect.bundleId)
+            && isResolvedTeamID(inspect.teamId)
+            && profile.installed
+            && !profile.expired
+            && profile.supportsIOS
+            && bundleAligned
+            && result.certificateFound
+        return result
+    }
+
+    static func legacyIdentityWarning(projectIdentity: String, expectsDevelopment: Bool) -> String? {
+        let identity = projectIdentity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !identity.isEmpty else { return nil }
+        let legacy = expectsDevelopment
+            ? identity.hasPrefix("iphone developer")
+            : identity.hasPrefix("iphone distribution")
+        guard legacy else { return nil }
+        return L10n.t(
+            "The project still uses the legacy identity \"\(projectIdentity)\". This archive will use the matching certificate from the keychain instead.",
+            "工程还在用旧的证书名 \"\(projectIdentity)\"。本次 Archive 会改用钥匙串里匹配到的证书。"
+        )
+    }
+
+    static func profileGroups(in profiles: [ProfileInfo], configuration: String) -> [ProfileGroup] {
+        var order = preferredProfileKinds(for: configuration)
+        for kind in ["appstore", "adhoc", "enterprise", "development", ""] where !order.contains(kind) {
+            order.append(kind)
+        }
+        return order.compactMap { kind in
+            let items = profiles.filter { $0.kind == kind || (kind.isEmpty && !["appstore", "adhoc", "enterprise", "development"].contains($0.kind)) }
+            guard !items.isEmpty else { return nil }
+            let title: String
+            switch kind {
+            case "appstore": title = L10n.t("App Store", "App Store")
+            case "development": title = L10n.t("Development", "开发")
+            case "adhoc": title = L10n.t("Ad Hoc", "Ad Hoc")
+            case "enterprise": title = L10n.t("Enterprise", "企业")
+            default: title = L10n.t("Other", "其他")
+            }
+            return ProfileGroup(kind: kind, title: title, profiles: items)
+        }
     }
 
     static func bundleMatches(_ profileBundle: String, _ appBundle: String) -> Bool {
@@ -648,12 +789,19 @@ final class XcodePipeline: @unchecked Sendable {
         kind == "development" ? "Apple Development" : "Apple Distribution"
     }
 
-    static func exportOptionsPlist(teamId: String, bundleId: String, profile: String, profileKind: String) -> String {
+    static func exportOptionsPlist(
+        teamId: String,
+        bundleId: String,
+        profile: String,
+        profileKind: String,
+        signingCertificate: String
+    ) -> String {
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: ">", with: "&gt;")
         }
+        let certificate = signingCertificate.isEmpty ? Self.signingCertificate(for: profileKind) : signingCertificate
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -668,7 +816,7 @@ final class XcodePipeline: @unchecked Sendable {
         	<key>teamID</key>
         	<string>\(esc(teamId))</string>
         	<key>signingCertificate</key>
-        	<string>\(esc(signingCertificate(for: profileKind)))</string>
+        	<string>\(esc(certificate))</string>
         	<key>stripSwiftSymbols</key>
         	<true/>
         	<key>provisioningProfiles</key>

@@ -114,8 +114,13 @@ struct ContentView: View {
                     if ins.profiles.isEmpty {
                         Text(L10n.t("No matching profile on this Mac", "本机没有匹配的描述文件")).tag("")
                     }
-                    ForEach(ins.profiles) { p in
-                        Text(p.displayName).tag(p.value)
+                    ForEach(engine.profileGroups) { group in
+                        Section(group.title) {
+                            ForEach(group.profiles) { profile in
+                                Text(profile.displayName).tag(profile.value)
+                                    .disabled(!profile.selectable)
+                            }
+                        }
                     }
                 }
                 .labelsHidden()
@@ -125,8 +130,8 @@ struct ContentView: View {
                 factRow("Team", ins.teamId)
                 factRow(L10n.t("Style", "方式"), ins.signingStyle)
                 certRow
-                if !ins.warnings.isEmpty {
-                    ForEach(ins.warnings, id: \.self) { w in
+                if !engine.assessment.warnings.isEmpty {
+                    ForEach(engine.assessment.warnings, id: \.self) { w in
                         Label(w, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
@@ -140,17 +145,15 @@ struct ContentView: View {
     }
 
     private var certRow: some View {
-        let development = engine.inspect?.usesDevelopmentSigning == true
-        let found = development
-            ? (engine.inspect?.developmentCerts.isEmpty == false)
-            : (engine.inspect?.distributionCerts.isEmpty == false)
+        let signing = engine.assessment
+        let found = signing.certificateFound
         let label: String
         if found {
-            label = development
-                ? L10n.t("Apple Development found", "已找到 Apple Development")
-                : L10n.t("Apple Distribution found", "已找到 Apple Distribution")
+            label = signing.identityName
+        } else if signing.expectsDevelopment {
+            label = L10n.t("No matching Apple Development certificate", "没有匹配的 Apple Development 证书")
         } else {
-            label = L10n.t("Not found in Keychain", "钥匙串中没有")
+            label = L10n.t("No matching Apple Distribution certificate", "没有匹配的 Apple Distribution 证书")
         }
         return HStack(alignment: .firstTextBaseline) {
             Text(L10n.t("Certificate", "证书"))

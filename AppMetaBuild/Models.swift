@@ -15,6 +15,15 @@ struct ProfileInfo: Hashable, Identifiable {
     var match = ""
     var path = ""
     var certFingerprints: [String] = []
+    var platforms: [String] = []
+    var platformKnown = false
+    var installed: Bool { !path.isEmpty }
+    var supportsIOS: Bool {
+        platforms.contains { name in
+            let value = name.lowercased()
+            return value == "ios" || value == "iphoneos" || value == "iphone" || value.contains("iphoneos")
+        }
+    }
     var displayName: String {
         let star = match == "project" ? "★ " : ""
         let kindLabel: String
@@ -25,10 +34,40 @@ struct ProfileInfo: Hashable, Identifiable {
         case "enterprise": kindLabel = L10n.t("Enterprise", "企业")
         default: kindLabel = ""
         }
-        if kindLabel.isEmpty { return star + name }
-        return "\(star)\(name) · \(kindLabel)"
+        var text = kindLabel.isEmpty ? star + name : "\(star)\(name) · \(kindLabel)"
+        if path.isEmpty {
+            text += " · " + L10n.t("Not installed", "未安装")
+        } else if expired {
+            text += " · " + L10n.t("Expired", "已过期")
+        } else if !platformKnown {
+            text += " · " + L10n.t("Unknown platform", "平台未知")
+        }
+        return text
     }
     var value: String { name.isEmpty ? uuid : name }
+    var selectable: Bool { installed && !expired && (supportsIOS || !platformKnown) }
+}
+
+struct SigningIdentity: Hashable, Sendable {
+    var fingerprint = ""
+    var name = ""
+    var kind = ""
+    var line = ""
+}
+
+struct SigningAssessment: Equatable {
+    var ready = false
+    var warnings: [String] = []
+    var identityName = ""
+    var expectsDevelopment = false
+    var certificateFound = false
+}
+
+struct ProfileGroup: Identifiable {
+    var id: String { kind.isEmpty ? "other" : kind }
+    var kind = ""
+    var title = ""
+    var profiles: [ProfileInfo] = []
 }
 
 struct InspectResult {
@@ -45,6 +84,7 @@ struct InspectResult {
     var profileSpecifier = ""
     var distributionCerts: [String] = []
     var developmentCerts: [String] = []
+    var identities: [SigningIdentity] = []
     var profiles: [ProfileInfo] = []
     var selectedProfile: ProfileInfo?
     var warnings: [String] = []
