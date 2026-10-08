@@ -54,7 +54,7 @@ struct InspectResult {
     }
 }
 
-struct Credentials: Codable, Equatable {
+struct Credentials: Codable, Equatable, Sendable {
     var keyId = ""
     var issuerId = ""
     var privateKeyPath = ""
@@ -65,11 +65,18 @@ struct Credentials: Codable, Equatable {
     }
 }
 
-enum BuildError: LocalizedError {
+struct ArchiveProduct: Equatable, Sendable {
+    var ipaPath: String
+    var logPath: String
+}
+
+enum BuildError: LocalizedError, Equatable {
     case message(String)
+    case cancelled
     var errorDescription: String? {
         switch self {
         case .message(let s): return s
+        case .cancelled: return L10n.t("Cancelled.", "已取消。")
         }
     }
 }

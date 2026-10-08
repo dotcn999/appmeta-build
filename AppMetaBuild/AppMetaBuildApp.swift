@@ -1,7 +1,21 @@
 import SwiftUI
+import AppKit
+
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        let busy = BuildEngine.active?.busy ?? false
+        BuildEngine.active?.cancel()
+        guard busy else { return .terminateNow }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+}
 
 @main
 struct AppMetaBuildApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @ObservedObject private var appearance = AppearanceStore.shared
 
     var body: some Scene {

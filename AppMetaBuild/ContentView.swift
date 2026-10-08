@@ -59,9 +59,12 @@ struct ContentView: View {
             sectionTitle(L10n.t("API Key", "API Key"),
                          subtitle: L10n.t("Stored only on this Mac.", "仅保存在这台 Mac 上。"))
             labeledField("Key ID", text: $engine.credentials.keyId)
+                .disabled(engine.busy)
             labeledField("Issuer ID", text: $engine.credentials.issuerId)
+                .disabled(engine.busy)
             HStack {
                 Button(L10n.t("Choose .p8", "选择 .p8")) { engine.choosePrivateKey() }
+                    .disabled(engine.busy)
                 Spacer()
                 statusDot(ok: engine.canUpload,
                           okText: L10n.t("Key ready", "密钥已就绪"),
@@ -85,8 +88,10 @@ struct ContentView: View {
                          subtitle: L10n.t("Select a .xcodeproj, then inspect.", "选择 .xcodeproj，然后识别。"))
             TextField(L10n.t("Project path", "工程路径"), text: $engine.projectPath)
                 .textFieldStyle(.roundedBorder)
+                .disabled(engine.busy)
             HStack {
                 Button(L10n.t("Choose…", "选择…")) { engine.chooseProject() }
+                    .disabled(engine.busy)
                 Button(L10n.t("Inspect", "识别工程")) { engine.runInspect() }
                     .buttonStyle(.borderedProminent)
                     .disabled(engine.projectPath.isEmpty || engine.busy)
@@ -244,20 +249,10 @@ struct ContentView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 8)
             Divider()
-            ScrollViewReader { proxy in
-                ScrollView {
-                    Text(engine.log.isEmpty ? L10n.t("Build log appears here.", "构建日志会显示在这里。") : engine.log)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundStyle(engine.log.isEmpty ? .secondary : .primary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .textSelection(.enabled)
-                        .padding(12)
-                        .id("log-end")
-                }
-                .onChange(of: engine.log) { _ in
-                    proxy.scrollTo("log-end", anchor: .bottom)
-                }
-            }
+            LogTextView(
+                text: engine.log,
+                placeholder: L10n.t("Build log appears here.", "构建日志会显示在这里。")
+            )
         }
         .background(Color(nsColor: .textBackgroundColor))
     }
@@ -269,6 +264,7 @@ struct ContentView: View {
     }
 
     private var statusColor: Color {
+        if engine.wasCancelled && !engine.busy { return .orange }
         if !engine.lastError.isEmpty { return .red }
         if engine.busy { return .blue }
         if engine.ready { return .green }
@@ -276,8 +272,9 @@ struct ContentView: View {
     }
 
     private var statusTitle: String {
-        if !engine.lastError.isEmpty { return L10n.t("Failed", "失败") }
         if engine.busy { return engine.stage.isEmpty ? L10n.t("Working…", "进行中…") : engine.stage }
+        if engine.wasCancelled { return L10n.t("Cancelled.", "已取消。") }
+        if !engine.lastError.isEmpty { return L10n.t("Failed", "失败") }
         if !engine.artifact.isEmpty { return engine.stage.isEmpty ? L10n.t("IPA ready", "IPA 已就绪") : engine.stage }
         if engine.ready { return L10n.t("Ready to archive", "可以开始 Archive") }
         return L10n.t("Idle", "空闲")
@@ -316,6 +313,50 @@ struct ContentView: View {
             Text(value.isEmpty ? "—" : value)
                 .font(.caption)
                 .textSelection(.enabled)
+        }
+    }
+
+    private struct LogTextView: NSViewRepresentable {
+        var text: String
+        var placeholder: String
+
+        func makeCoordinator() -> Coordinator { Coordinator() }
+
+        func makeNSView(context: Context) -> NSScrollView {
+            let scroll = NSTextView.scrollableTextView()
+            guard let textView = scroll.documentView as? NSTextView else { return scroll }
+            textView.isEditable = false
+            textView.isSelectable = true
+            textView.isRichText = false
+            textView.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+            textView.textContainerInset = NSSize(width: 8, height: 8)
+            textView.drawsBackground = false
+            textView.isAutomaticQuoteSubstitutionEnabled = false
+            textView.isAutomaticDashSubstitutionEnabled = false
+            textView.isAutomaticTextReplacementEnabled = false
+            scroll.hasVerticalScroller = true
+            scroll.drawsBackground = false
+            scroll.borderType = .noBorder
+            return scroll
+        }
+
+        func updateNSView(_ scroll: NSScrollView, context: Context) {
+            guard let textView = scroll.documentView as? NSTextView else { return }
+            let shown = text.isEmpty ? placeholder : text
+            if textView.string == shown { return }
+            let clip = scroll.contentView
+            let atBottom = context.coordinator.stickToBottom
+                || clip.bounds.maxY >= max(textView.bounds.height - 32, 0)
+            textView.textColor = text.isEmpty ? .secondaryLabelColor : .labelColor
+            textView.string = shown
+            if atBottom {
+                textView.scrollToEndOfDocument(nil)
+            }
+            context.coordinator.stickToBottom = atBottom || text.isEmpty
+        }
+
+        final class Coordinator {
+            var stickToBottom = true
         }
     }
 

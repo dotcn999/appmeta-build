@@ -1,18 +1,29 @@
 import Foundation
 import CryptoKit
 
-final class XcodePipeline {
-    private let lock = NSLock()
-    private var current: Process?
+final class XcodePipeline: @unchecked Sendable {
+    private let commands: CommandExecuting
+    private static let profileCacheLock = NSLock()
+    private static var profileCache: [String: ProfileCacheEntry] = [:]
+
+    init(commands: CommandExecuting = CommandSession()) {
+        self.commands = commands
+    }
+
+    func prepareForNewOperation() {
+        commands.prepareForNewOperation()
+    }
 
     func cancel() {
-        lock.lock()
-        let proc = current
-        lock.unlock()
-        proc?.terminate()
+        commands.cancel()
+    }
+
+    private func checkCancelled() throws {
+        if commands.isCancelled { throw BuildError.cancelled }
     }
 
     func inspect(projectPath: String, scheme: String) throws -> InspectResult {
+        try checkCancelled()
         let project = try Self.resolveXcodeproj(projectPath)
         var res = InspectResult(projectPath: project)
         let listData = try runCapturing(["/usr/bin/xcodebuild", "-list", "-json", "-project", project])
@@ -32,7 +43,8 @@ final class XcodePipeline {
         if !res.configuration.isEmpty {
             settingsArgs += ["-configuration", res.configuration]
         }
-        if let settingsData = try? runCapturing(settingsArgs) {
+        do {
+            let settingsData = try runCapturing(settingsArgs)
             let settings = Self.pickSettings(settingsData)
             res.bundleId = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
             res.teamId = settings["DEVELOPMENT_TEAM"] ?? ""
@@ -43,13 +55,18 @@ final class XcodePipeline {
             if res.configuration.isEmpty {
                 res.configuration = settings["CONFIGURATION"] ?? ""
             }
+        } catch BuildError.cancelled {
+            throw BuildError.cancelled
+        } catch {
+            // Build settings are best-effort; the warnings below explain what is missing.
         }
         var specifiers = Self.pbxprojProfileSpecifiers(project)
         if !res.profileSpecifier.isEmpty { specifiers.insert(res.profileSpecifier, at: 0) }
         specifiers = Self.uniqueKeepOrder(specifiers)
         if res.profileSpecifier.isEmpty { res.profileSpecifier = specifiers.first ?? "" }
         var identityLines: [String] = []
-        if let ident = try? runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"]) {
+        do {
+            let ident = try runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"])
             let text = String(data: ident, encoding: .utf8) ?? ""
             identityLines = text.split(separator: "\n").map(String.init)
             res.distributionCerts = identityLines.filter {
@@ -58,8 +75,12 @@ final class XcodePipeline {
             res.developmentCerts = identityLines.filter {
                 $0.contains("Apple Development") || $0.contains("iPhone Developer")
             }
+        } catch BuildError.cancelled {
+            throw BuildError.cancelled
+        } catch {
+            // A missing identity list is reported as "certificate not found".
         }
-        let installed = Self.installedProfiles()
+        let installed = try installedProfiles()
         res.profiles = Self.matchProfiles(
             installed,
             bundleId: res.bundleId,
@@ -152,7 +173,8 @@ final class XcodePipeline {
         profileKind: String,
         onLog: @escaping (String) -> Void,
         onStage: @escaping (String, String) -> Void
-    ) throws -> String {
+    ) throws -> ArchiveProduct {
+        try checkCancelled()
         let proj = try Self.resolveXcodeproj(project)
         let config = configuration.isEmpty ? "Release" : configuration
         let fmt = DateFormatter()
@@ -162,43 +184,55 @@ final class XcodePipeline {
             .appendingPathComponent("build/appmeta-local/\(stamp)", isDirectory: true)
         let exportDir = outDir.appendingPathComponent("export", isDirectory: true)
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
+        let logURL = outDir.appendingPathComponent("build.log")
         let archivePath = outDir.appendingPathComponent("\(scheme).xcarchive").path
         let plistPath = outDir.appendingPathComponent("ExportOptions.plist").path
         try Self.exportOptionsPlist(teamId: teamId, bundleId: bundleId, profile: profile, profileKind: profileKind)
             .write(toFile: plistPath, atomically: true, encoding: .utf8)
 
+        let logger = LineLog(url: logURL)
+        defer { logger?.close() }
+        let emit: (String) -> Void = { line in
+            logger?.write(line)
+            onLog(line)
+        }
+        emit("Log: \(logURL.path)")
         onStage("archive", L10n.t("Archiving \(config). This can take several minutes.", "正在 Archive \(config)，可能需要几分钟。"))
-        onLog("xcodebuild archive -project \(proj) -scheme \(scheme) -configuration \(config)")
-        try runStreaming(onLog: onLog, arguments: [
+        emit("xcodebuild archive -project \(proj) -scheme \(scheme) -configuration \(config)")
+        let workDirectory = URL(fileURLWithPath: proj).deletingLastPathComponent().path
+        try runStreaming(onLog: emit, arguments: [
             "/usr/bin/xcodebuild", "archive",
             "-project", proj,
             "-scheme", scheme,
             "-configuration", config,
             "-destination", "generic/platform=iOS",
             "-archivePath", archivePath,
-        ], directory: URL(fileURLWithPath: proj).deletingLastPathComponent().path)
+        ], directory: workDirectory)
+        try checkCancelled()
 
         onStage("export", L10n.t("Exporting a manually signed IPA.", "正在导出手动签名 IPA。"))
-        onLog("xcodebuild -exportArchive")
-        try runStreaming(onLog: onLog, arguments: [
+        emit("xcodebuild -exportArchive")
+        try runStreaming(onLog: emit, arguments: [
             "/usr/bin/xcodebuild", "-exportArchive",
             "-archivePath", archivePath,
             "-exportPath", exportDir.path,
             "-exportOptionsPlist", plistPath,
-        ], directory: URL(fileURLWithPath: proj).deletingLastPathComponent().path)
+        ], directory: workDirectory)
 
         guard let ipa = Self.firstIPA(in: exportDir.path) else {
             throw BuildError.message(L10n.t("Export finished but no IPA was produced.", "导出结束但没有生成 IPA。"))
         }
         onLog("IPA: \(ipa)")
-        return ipa
+        return ArchiveProduct(ipaPath: ipa, logPath: logURL.path)
     }
 
-    func upload(ipa: String, credentials: Credentials, onLog: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void) throws {
+    func upload(ipa: String, credentials: Credentials, logFile: URL? = nil, onLog: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void) throws {
+        try checkCancelled()
         onStage("upload", L10n.t("Uploading IPA to App Store Connect.", "正在上传 IPA 到 App Store Connect。"))
         let keyDir = try Self.prepareKeyDir(credentials)
         defer { try? FileManager.default.removeItem(at: keyDir) }
-        let env = ["API_PRIVATE_KEYS_DIR=\(keyDir.path)"]
+        let env = ["API_PRIVATE_KEYS_DIR": keyDir.path]
+        let directory = (ipa as NSString).deletingLastPathComponent
         onLog("xcrun altool --upload-app -t ios --show-progress")
         do {
             try runStreaming(onLog: onLog, arguments: [
@@ -207,15 +241,18 @@ final class XcodePipeline {
                 "--apiKey", credentials.keyId,
                 "--apiIssuer", credentials.issuerId,
                 "--show-progress",
-            ], directory: (ipa as NSString).deletingLastPathComponent, extraEnv: env)
+            ], directory: directory, extraEnv: env, logFile: logFile)
+        } catch BuildError.cancelled {
+            throw BuildError.cancelled
         } catch {
+            try checkCancelled()
             onLog("altool failed, trying iTMSTransporter: \(error.localizedDescription)")
             try runStreaming(onLog: onLog, arguments: [
                 "/usr/bin/xcrun", "iTMSTransporter", "-m", "upload",
                 "-assetFile", ipa,
                 "-apiKey", credentials.keyId,
                 "-apiIssuer", credentials.issuerId,
-            ], directory: (ipa as NSString).deletingLastPathComponent, extraEnv: env)
+            ], directory: directory, extraEnv: env, logFile: logFile)
         }
         onStage("uploaded", L10n.t(
             "Delivery succeeded. Apple still needs to process the build before it appears in App Store Connect.",
@@ -224,61 +261,32 @@ final class XcodePipeline {
     }
 
     private func runCapturing(_ arguments: [String]) throws -> Data {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: arguments[0])
-        proc.arguments = Array(arguments.dropFirst())
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = Pipe()
-        try proc.run()
-        let data = out.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        if proc.terminationStatus != 0 {
-            let msg = String(data: data, encoding: .utf8) ?? "exit \(proc.terminationStatus)"
-            throw BuildError.message(msg)
-        }
-        return data
+        try checkCancelled()
+        let output = try commands.run(
+            arguments: arguments,
+            directory: "",
+            extraEnvironment: [:],
+            onLog: nil,
+            logFile: nil
+        )
+        return output.stdout
     }
 
-    private func runStreaming(onLog: @escaping (String) -> Void, arguments: [String], directory: String, extraEnv: [String] = []) throws {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: arguments[0])
-        proc.arguments = Array(arguments.dropFirst())
-        proc.currentDirectoryURL = URL(fileURLWithPath: directory)
-        var env = ProcessInfo.processInfo.environment
-        for item in extraEnv {
-            if let eq = item.firstIndex(of: "=") {
-                env[String(item[..<eq])] = String(item[item.index(after: eq)...])
-            }
-        }
-        proc.environment = env
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = out
-        lock.lock(); current = proc; lock.unlock()
-        try proc.run()
-        let handle = out.fileHandleForReading
-        var leftover = ""
-        handle.readabilityHandler = { h in
-            let data = h.availableData
-            guard !data.isEmpty, let chunk = String(data: data, encoding: .utf8) else { return }
-            leftover += chunk
-            let parts = leftover.split(separator: "\n", omittingEmptySubsequences: false)
-            leftover = String(parts.last ?? "")
-            for line in parts.dropLast() {
-                let text = String(line)
-                if !text.isEmpty { onLog(text) }
-            }
-        }
-        proc.waitUntilExit()
-        handle.readabilityHandler = nil
-        if let rest = String(data: handle.readDataToEndOfFile(), encoding: .utf8), !rest.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            onLog(rest)
-        }
-        lock.lock(); current = nil; lock.unlock()
-        if proc.terminationStatus != 0 {
-            throw BuildError.message("command failed (\(proc.terminationStatus)): \(arguments.joined(separator: " "))")
-        }
+    private func runStreaming(
+        onLog: @escaping (String) -> Void,
+        arguments: [String],
+        directory: String,
+        extraEnv: [String: String] = [:],
+        logFile: URL? = nil
+    ) throws {
+        try checkCancelled()
+        _ = try commands.run(
+            arguments: arguments,
+            directory: directory,
+            extraEnvironment: extraEnv,
+            onLog: onLog,
+            logFile: logFile
+        )
     }
 
     static func resolveXcodeproj(_ path: String) throws -> String {
@@ -363,7 +371,7 @@ final class XcodePipeline {
     }
 
     static func parseList(_ data: Data) throws -> (String, [String]) {
-        let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] ?? [:]
+        let obj = try JSONPayload.object(from: data)
         if let project = obj["project"] as? [String: Any], let schemes = project["schemes"] as? [String], !schemes.isEmpty {
             return (project["name"] as? String ?? "", schemes)
         }
@@ -374,11 +382,7 @@ final class XcodePipeline {
     }
 
     static func jsonArray(from data: Data) -> [[String: Any]]? {
-        if let arr = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] { return arr }
-        guard let text = String(data: data, encoding: .utf8),
-              let idx = text.firstIndex(of: "[") else { return nil }
-        let sliced = String(text[idx...]).data(using: .utf8) ?? data
-        return (try? JSONSerialization.jsonObject(with: sliced)) as? [[String: Any]]
+        JSONPayload.array(from: data)
     }
 
     static func stringSettings(_ raw: [String: Any]) -> [String: String] {
@@ -453,7 +457,7 @@ final class XcodePipeline {
         Insecure.SHA1.hash(data: data).map { String(format: "%02X", $0) }.joined()
     }
 
-    static func installedProfiles() -> [ProfileInfo] {
+    func installedProfiles() throws -> [ProfileInfo] {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let dirs = [
             home.appendingPathComponent("Library/MobileDevice/Provisioning Profiles"),
@@ -464,10 +468,11 @@ final class XcodePipeline {
         for dir in dirs {
             guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir.path) else { continue }
             for name in files {
+                try checkCancelled()
                 let lower = name.lowercased()
                 guard lower.hasSuffix(".mobileprovision") || lower.hasSuffix(".provisionprofile") else { continue }
                 let path = dir.appendingPathComponent(name).path
-                guard let info = decodeProfile(path) else { continue }
+                guard let info = try decodeProfile(path) else { continue }
                 let key = info.uuid.isEmpty ? path : info.uuid
                 if seen.insert(key).inserted {
                     result.append(info)
@@ -477,18 +482,51 @@ final class XcodePipeline {
         return result
     }
 
-    static func decodeProfile(_ path: String) -> ProfileInfo? {
-        let cms = Process()
-        cms.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-        cms.arguments = ["cms", "-D", "-i", path]
-        let cmsOut = Pipe()
-        cms.standardOutput = cmsOut
-        cms.standardError = Pipe()
-        try? cms.run()
-        let xml = cmsOut.fileHandleForReading.readDataToEndOfFile()
-        cms.waitUntilExit()
-        guard cms.terminationStatus == 0,
-              let obj = try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil) as? [String: Any]
+    func decodeProfile(_ path: String) throws -> ProfileInfo? {
+        if let cached = Self.cachedProfile(at: path) { return cached }
+        let xml: Data
+        do {
+            xml = try runCapturing(["/usr/bin/security", "cms", "-D", "-i", path])
+        } catch BuildError.cancelled {
+            throw BuildError.cancelled
+        } catch {
+            return nil
+        }
+        guard let info = Self.profileInfo(from: xml, path: path) else { return nil }
+        Self.storeProfile(info, at: path)
+        return info
+    }
+
+    private struct ProfileCacheEntry {
+        var modified: Date
+        var size: UInt64
+        var info: ProfileInfo
+    }
+
+    private static func fileStamp(_ path: String) -> (Date, UInt64)? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let modified = attrs[.modificationDate] as? Date else { return nil }
+        let size = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        return (modified, size)
+    }
+
+    private static func cachedProfile(at path: String) -> ProfileInfo? {
+        guard let (modified, size) = fileStamp(path) else { return nil }
+        profileCacheLock.lock()
+        defer { profileCacheLock.unlock() }
+        guard let entry = profileCache[path], entry.modified == modified, entry.size == size else { return nil }
+        return entry.info
+    }
+
+    private static func storeProfile(_ info: ProfileInfo, at path: String) {
+        guard let (modified, size) = fileStamp(path) else { return }
+        profileCacheLock.lock()
+        profileCache[path] = ProfileCacheEntry(modified: modified, size: size, info: info)
+        profileCacheLock.unlock()
+    }
+
+    static func profileInfo(from xml: Data, path: String) -> ProfileInfo? {
+        guard let obj = try? PropertyListSerialization.propertyList(from: xml, options: [], format: nil) as? [String: Any]
         else { return nil }
         let entitlements = obj["Entitlements"] as? [String: Any] ?? [:]
         let appId = (entitlements["application-identifier"] as? String)
