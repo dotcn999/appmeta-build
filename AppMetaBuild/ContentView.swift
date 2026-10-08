@@ -126,7 +126,21 @@ struct ContentView: View {
                 .labelsHidden()
                 .disabled(engine.busy)
                 factRow(L10n.t("Configuration", "配置"), ins.configuration)
-                factRow(L10n.t("Bundle ID", "Bundle ID"), ins.bundleId)
+                if !ins.products.isEmpty {
+                    ForEach(ins.products) { product in
+                        factRow(
+                            product.isMain ? L10n.t("App", "主 App") : product.target,
+                            product.profileName.isEmpty
+                                ? product.bundleId
+                                : "\(product.bundleId) · \(product.profileName)"
+                        )
+                    }
+                } else {
+                    factRow(L10n.t("Bundle ID", "Bundle ID"), ins.bundleId)
+                }
+                if !engine.marketingVersion.isEmpty || !engine.buildNumber.isEmpty {
+                    factRow(L10n.t("Version", "版本"), "\(engine.marketingVersion) (\(engine.buildNumber))")
+                }
                 factRow("Team", ins.teamId)
                 factRow(L10n.t("Style", "方式"), ins.signingStyle)
                 certRow
@@ -159,7 +173,7 @@ struct ContentView: View {
             Text(L10n.t("Certificate", "证书"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
+                .frame(width: 88, alignment: .leading)
             Text(label)
                 .font(.caption)
                 .foregroundStyle(found ? Color.green : Color.orange)
@@ -187,6 +201,12 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 8) {
+                actionGridButton(
+                    L10n.t("Build +1", "Build 号 +1"),
+                    disabled: engine.busy || engine.inspect == nil || Int(engine.buildNumber) == nil
+                ) {
+                    engine.incrementBuildNumber()
+                }
                 actionGridButton(L10n.t("Cancel", "取消"), role: .destructive, disabled: !engine.busy) {
                     engine.cancel()
                 }
@@ -312,7 +332,7 @@ struct ContentView: View {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
+                .frame(width: 88, alignment: .leading)
             Text(value.isEmpty ? "—" : value)
                 .font(.caption)
                 .textSelection(.enabled)

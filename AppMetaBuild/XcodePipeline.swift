@@ -24,9 +24,10 @@ final class XcodePipeline: @unchecked Sendable {
 
     func inspect(projectPath: String, scheme: String) throws -> InspectResult {
         try checkCancelled()
-        let project = try Self.resolveXcodeproj(projectPath)
-        var res = InspectResult(projectPath: project)
-        let listData = try runCapturing(["/usr/bin/xcodebuild", "-list", "-json", "-project", project])
+        let container = try Self.resolveContainer(projectPath)
+        var res = InspectResult(projectPath: container.path)
+        res.containerKind = container.kind
+        let listData = try runCapturing(["/usr/bin/xcodebuild", "-list", "-json", container.flag, container.path])
         let (name, schemes) = try Self.parseList(listData)
         res.projectName = name
         res.schemes = schemes
@@ -34,21 +35,25 @@ final class XcodePipeline: @unchecked Sendable {
         if res.suggestedScheme.isEmpty {
             throw BuildError.message(L10n.t("No scheme found; share a scheme in Xcode.", "没有 scheme；请在 Xcode 里 Share 一个 scheme。"))
         }
-        res.configuration = Self.resolveConfiguration(project: project, scheme: res.suggestedScheme)
+        res.configuration = Self.resolveConfiguration(project: container.path, scheme: res.suggestedScheme)
         var settingsArgs = [
             "/usr/bin/xcodebuild", "-showBuildSettings", "-json",
-            "-project", project, "-scheme", res.suggestedScheme,
+            container.flag, container.path, "-scheme", res.suggestedScheme,
             "-destination", "generic/platform=iOS",
         ]
         if !res.configuration.isEmpty {
             settingsArgs += ["-configuration", res.configuration]
         }
+        var rawProducts: [SignedProduct] = []
         do {
             let settingsData = try runCapturing(settingsArgs)
+            rawProducts = Self.signedProducts(from: settingsData)
             let settings = Self.pickSettings(settingsData)
             res.bundleId = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
             res.teamId = settings["DEVELOPMENT_TEAM"] ?? ""
             res.productName = settings["PRODUCT_NAME"] ?? ""
+            res.marketingVersion = Self.resolvedSetting(settings["MARKETING_VERSION"])
+            res.buildNumber = Self.resolvedSetting(settings["CURRENT_PROJECT_VERSION"])
             res.signingStyle = settings["CODE_SIGN_STYLE"] ?? ""
             res.codeSignIdentity = settings["CODE_SIGN_IDENTITY"] ?? ""
             res.profileSpecifier = settings["PROVISIONING_PROFILE_SPECIFIER"] ?? settings["PROVISIONING_PROFILE"] ?? ""
@@ -60,10 +65,6 @@ final class XcodePipeline: @unchecked Sendable {
         } catch {
             // Build settings are best-effort; the warnings below explain what is missing.
         }
-        var specifiers = Self.pbxprojProfileSpecifiers(project)
-        if !res.profileSpecifier.isEmpty { specifiers.insert(res.profileSpecifier, at: 0) }
-        specifiers = Self.uniqueKeepOrder(specifiers)
-        if res.profileSpecifier.isEmpty { res.profileSpecifier = specifiers.first ?? "" }
         var identityLines: [String] = []
         do {
             let ident = try runCapturing(["/usr/bin/security", "find-identity", "-v", "-p", "codesigning"])
@@ -85,6 +86,26 @@ final class XcodePipeline: @unchecked Sendable {
             specifier: res.profileSpecifier,
             configuration: res.configuration
         )
+        if rawProducts.isEmpty, Self.isResolvedBundleID(res.bundleId) {
+            rawProducts = [SignedProduct(
+                target: res.productName,
+                bundleId: res.bundleId,
+                productType: "com.apple.product-type.application",
+                profileSpecifier: res.profileSpecifier,
+                isMain: true
+            )]
+        }
+        res.products = Self.assignProfiles(
+            rawProducts,
+            installed: installed,
+            teamId: res.teamId,
+            configuration: res.configuration,
+            identities: res.identities,
+            mainBundleId: res.bundleId
+        )
+        if let main = res.products.first(where: \.isMain), !main.profileSpecifier.isEmpty {
+            res.profileSpecifier = main.profileSpecifier
+        }
         res.selectedProfile = Self.defaultProfile(
             in: res.profiles,
             specifier: res.profileSpecifier,
@@ -107,26 +128,29 @@ final class XcodePipeline: @unchecked Sendable {
         profile: String,
         profileKind: String,
         signingIdentity: String,
+        products: [SignedProduct],
         onLog: @escaping (String) -> Void,
         onStage: @escaping (String, String) -> Void
     ) throws -> ArchiveProduct {
         try checkCancelled()
-        let proj = try Self.resolveXcodeproj(project)
+        let container = try Self.resolveContainer(project)
         let config = configuration.isEmpty ? "Release" : configuration
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyyMMdd-HHmmss"
-        let stamp = fmt.string(from: Date())
-        let outDir = URL(fileURLWithPath: proj).deletingLastPathComponent()
-            .appendingPathComponent("build/appmeta-local/\(stamp)", isDirectory: true)
+        let outDir = try Self.makeOutputDirectory(for: container.path)
         let exportDir = outDir.appendingPathComponent("export", isDirectory: true)
         try FileManager.default.createDirectory(at: exportDir, withIntermediateDirectories: true)
         let logURL = outDir.appendingPathComponent("build.log")
         let archivePath = outDir.appendingPathComponent("\(scheme).xcarchive").path
         let plistPath = outDir.appendingPathComponent("ExportOptions.plist").path
+        let profileMap = Self.profileMap(products: products, mainBundleId: bundleId, mainProfile: profile)
+        if products.contains(where: { !$0.isMain && $0.profileName.isEmpty }) {
+            throw BuildError.message(L10n.t(
+                "A signed target has no matching provisioning profile.",
+                "有一个需要签名的 Target 没有匹配的描述文件。"
+            ))
+        }
         try Self.exportOptionsPlist(
             teamId: teamId,
-            bundleId: bundleId,
-            profile: profile,
+            profiles: profileMap,
             profileKind: profileKind,
             signingCertificate: signingIdentity
         ).write(toFile: plistPath, atomically: true, encoding: .utf8)
@@ -142,11 +166,11 @@ final class XcodePipeline: @unchecked Sendable {
         emit("Identity \(signingIdentity)")
         emit("Profile \(profile)")
         onStage("archive", L10n.t("Archiving \(config). This can take several minutes.", "正在 Archive \(config)，可能需要几分钟。"))
-        emit("xcodebuild archive -project \(proj) -scheme \(scheme) -configuration \(config)")
-        let workDirectory = URL(fileURLWithPath: proj).deletingLastPathComponent().path
+        emit("xcodebuild archive \(container.flag) \(container.path) -scheme \(scheme) -configuration \(config)")
+        let workDirectory = URL(fileURLWithPath: container.path).deletingLastPathComponent().path
         var archiveArguments = [
             "/usr/bin/xcodebuild", "archive",
-            "-project", proj,
+            container.flag, container.path,
             "-scheme", scheme,
             "-configuration", config,
             "-destination", "generic/platform=iOS",
@@ -154,7 +178,9 @@ final class XcodePipeline: @unchecked Sendable {
             "CODE_SIGN_STYLE=Manual",
         ]
         if !teamId.isEmpty { archiveArguments.append("DEVELOPMENT_TEAM=\(teamId)") }
-        if !profile.isEmpty { archiveArguments.append("PROVISIONING_PROFILE_SPECIFIER=\(profile)") }
+        if products.count <= 1, !profile.isEmpty {
+            archiveArguments.append("PROVISIONING_PROFILE_SPECIFIER=\(profile)")
+        }
         if !signingIdentity.isEmpty { archiveArguments.append("CODE_SIGN_IDENTITY=\(signingIdentity)") }
         try runStreaming(onLog: emit, arguments: archiveArguments, directory: workDirectory)
         try checkCancelled()
@@ -171,19 +197,64 @@ final class XcodePipeline: @unchecked Sendable {
         guard let ipa = Self.firstIPA(in: exportDir.path) else {
             throw BuildError.message(L10n.t("Export finished but no IPA was produced.", "导出结束但没有生成 IPA。"))
         }
-        onLog("IPA: \(ipa)")
-        return ArchiveProduct(ipaPath: ipa, logPath: logURL.path)
+        let versions = Self.readAppVersion(inArchive: archivePath)
+        Self.preserveSymbols(fromArchive: archivePath, to: outDir)
+        try? FileManager.default.removeItem(atPath: archivePath)
+        let metadata = ExportMetadata(
+            method: try Self.exportMethod(for: profileKind),
+            bundleId: bundleId,
+            version: versions.version,
+            build: versions.build,
+            profile: profile
+        )
+        let metadataURL = URL(fileURLWithPath: ipa).deletingPathExtension().appendingPathExtension("export-metadata.json")
+        if let data = try? JSONEncoder.pretty.encode(metadata) {
+            try? data.write(to: metadataURL)
+        }
+        emit("IPA: \(ipa)")
+        if !versions.version.isEmpty || !versions.build.isEmpty {
+            emit("Version \(versions.version) (\(versions.build))")
+        }
+        return ArchiveProduct(
+            ipaPath: ipa,
+            logPath: logURL.path,
+            version: versions.version,
+            build: versions.build,
+            metadataPath: metadataURL.path
+        )
     }
 
     func upload(ipa: String, credentials: Credentials, logFile: URL? = nil, onLog: @escaping (String) -> Void, onStage: @escaping (String, String) -> Void) throws {
         try checkCancelled()
+        let method = try ipaDistributionMethod(ipa)
+        guard method == "app-store-connect" else {
+            throw BuildError.message(L10n.t(
+                "Only an App Store IPA can be uploaded.",
+                "只有 App Store IPA 可以上传。"
+            ))
+        }
         onStage("upload", L10n.t("Uploading IPA to App Store Connect.", "正在上传 IPA 到 App Store Connect。"))
         let keyDir = try Self.prepareKeyDir(credentials)
         defer { try? FileManager.default.removeItem(at: keyDir) }
         let env = ["API_PRIVATE_KEYS_DIR": keyDir.path]
         let directory = (ipa as NSString).deletingLastPathComponent
-        onLog("xcrun altool --upload-app -t ios --show-progress")
+        let transporterPath: String
         do {
+            let transporter = try commands.run(
+                arguments: ["/usr/bin/xcrun", "--find", "iTMSTransporter"],
+                directory: "",
+                extraEnvironment: [:],
+                onLog: nil,
+                logFile: nil
+            )
+            transporterPath = String(decoding: transporter.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch BuildError.cancelled {
+            throw BuildError.cancelled
+        } catch {
+            transporterPath = ""
+        }
+        if transporterPath.isEmpty {
+            onLog("iTMSTransporter was not found, trying altool")
             try runStreaming(onLog: onLog, arguments: [
                 "/usr/bin/xcrun", "altool", "--upload-app",
                 "-f", ipa, "-t", "ios",
@@ -191,11 +262,8 @@ final class XcodePipeline: @unchecked Sendable {
                 "--apiIssuer", credentials.issuerId,
                 "--show-progress",
             ], directory: directory, extraEnv: env, logFile: logFile)
-        } catch BuildError.cancelled {
-            throw BuildError.cancelled
-        } catch {
-            try checkCancelled()
-            onLog("altool failed, trying iTMSTransporter: \(error.localizedDescription)")
+        } else {
+            onLog("xcrun iTMSTransporter -m upload")
             try runStreaming(onLog: onLog, arguments: [
                 "/usr/bin/xcrun", "iTMSTransporter", "-m", "upload",
                 "-assetFile", ipa,
@@ -238,23 +306,44 @@ final class XcodePipeline: @unchecked Sendable {
         )
     }
 
-    static func resolveXcodeproj(_ path: String) throws -> String {
+    struct XcodeContainer: Equatable, Sendable {
+        var path: String
+        var kind: String
+        var flag: String { kind == "workspace" ? "-workspace" : "-project" }
+    }
+
+    static func resolveContainer(_ path: String) throws -> XcodeContainer {
         var path = (path as NSString).expandingTildeInPath
         path = URL(fileURLWithPath: path).standardizedFileURL.path
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir) else {
             throw BuildError.message(L10n.t("Project path not found.", "找不到工程路径。"))
         }
-        if path.lowercased().hasSuffix(".xcodeproj") { return path }
-        if path.lowercased().hasSuffix(".xcworkspace") {
-            throw BuildError.message(L10n.t("This app currently supports .xcodeproj only.", "当前只支持 .xcodeproj。"))
+        let lower = path.lowercased()
+        if lower.hasSuffix(".xcworkspace") { return XcodeContainer(path: path, kind: "workspace") }
+        if lower.hasSuffix(".xcodeproj") { return XcodeContainer(path: path, kind: "project") }
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: path)) ?? []
+        let workspaces = names.filter { $0.lowercased().hasSuffix(".xcworkspace") }
+        if workspaces.count > 1 {
+            throw BuildError.message(L10n.t("Folder contains multiple .xcworkspace files; pick one.", "文件夹里有多个 .xcworkspace，请选其中一个。"))
         }
-        let matches = (try? FileManager.default.contentsOfDirectory(atPath: path))?.filter { $0.lowercased().hasSuffix(".xcodeproj") } ?? []
-        if matches.count == 1 { return (path as NSString).appendingPathComponent(matches[0]) }
-        if matches.count > 1 {
+        if let workspace = workspaces.first {
+            return XcodeContainer(path: (path as NSString).appendingPathComponent(workspace), kind: "workspace")
+        }
+        let projects = names.filter { $0.lowercased().hasSuffix(".xcodeproj") }
+        if projects.count == 1 {
+            return XcodeContainer(path: (path as NSString).appendingPathComponent(projects[0]), kind: "project")
+        }
+        if projects.count > 1 {
             throw BuildError.message(L10n.t("Folder contains multiple .xcodeproj files; pick one.", "文件夹里有多个 .xcodeproj，请选其中一个。"))
         }
-        throw BuildError.message(L10n.t("No .xcodeproj found.", "没有找到 .xcodeproj。"))
+        throw BuildError.message(L10n.t("No .xcodeproj or .xcworkspace found.", "没有找到 .xcodeproj 或 .xcworkspace。"))
+    }
+
+    static func resolvedSetting(_ value: String?) -> String {
+        let text = (value ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty, !text.contains("$") else { return "" }
+        return text
     }
 
     static func suggestReleaseScheme(_ schemes: [String]) -> String {
@@ -268,18 +357,25 @@ final class XcodePipeline: @unchecked Sendable {
     }
 
     static func schemeXML(project: String, scheme: String) -> String? {
-        let proj = URL(fileURLWithPath: project)
-        var candidates = [
-            proj.appendingPathComponent("xcshareddata/xcschemes/\(scheme).xcscheme"),
-        ]
-        let userdata = proj.appendingPathComponent("xcuserdata")
-        if let users = try? FileManager.default.contentsOfDirectory(atPath: userdata.path) {
-            for user in users {
-                candidates.append(userdata.appendingPathComponent("\(user)/xcschemes/\(scheme).xcscheme"))
-            }
+        var roots = [URL(fileURLWithPath: project)]
+        if project.lowercased().hasSuffix(".xcworkspace") {
+            let parent = URL(fileURLWithPath: project).deletingLastPathComponent()
+            let children = (try? FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
+            roots.append(contentsOf: children.filter { $0.pathExtension == "xcodeproj" })
         }
-        for url in candidates {
-            if let xml = try? String(contentsOf: url, encoding: .utf8) { return xml }
+        for root in roots {
+            var candidates = [
+                root.appendingPathComponent("xcshareddata/xcschemes/\(scheme).xcscheme"),
+            ]
+            let userdata = root.appendingPathComponent("xcuserdata")
+            if let users = try? FileManager.default.contentsOfDirectory(atPath: userdata.path) {
+                for user in users {
+                    candidates.append(userdata.appendingPathComponent("\(user)/xcschemes/\(scheme).xcscheme"))
+                }
+            }
+            for url in candidates {
+                if let xml = try? String(contentsOf: url, encoding: .utf8) { return xml }
+            }
         }
         return nil
     }
@@ -776,12 +872,17 @@ final class XcodePipeline: @unchecked Sendable {
         return profileBundle == appBundle
     }
 
-    static func exportMethod(for kind: String) -> String {
+    static func exportMethod(for kind: String) throws -> String {
         switch kind {
         case "development": return "development"
         case "adhoc": return "ad-hoc"
         case "enterprise": return "enterprise"
-        default: return "app-store-connect"
+        case "appstore": return "app-store-connect"
+        default:
+            throw BuildError.message(L10n.t(
+                "Unknown provisioning profile type \"\(kind)\".",
+                "未知的描述文件类型 \"\(kind)\"。"
+            ))
         }
     }
 
@@ -791,24 +892,27 @@ final class XcodePipeline: @unchecked Sendable {
 
     static func exportOptionsPlist(
         teamId: String,
-        bundleId: String,
-        profile: String,
+        profiles: [String: String],
         profileKind: String,
         signingCertificate: String
-    ) -> String {
+    ) throws -> String {
         func esc(_ s: String) -> String {
             s.replacingOccurrences(of: "&", with: "&amp;")
                 .replacingOccurrences(of: "<", with: "&lt;")
                 .replacingOccurrences(of: ">", with: "&gt;")
         }
         let certificate = signingCertificate.isEmpty ? Self.signingCertificate(for: profileKind) : signingCertificate
+        let method = try exportMethod(for: profileKind)
+        let entries = profiles.keys.sorted().map { key in
+            "\t\t<key>\(esc(key))</key>\n\t\t<string>\(esc(profiles[key] ?? ""))</string>"
+        }.joined(separator: "\n")
         return """
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
         	<key>method</key>
-        	<string>\(esc(exportMethod(for: profileKind)))</string>
+        	<string>\(esc(method))</string>
         	<key>destination</key>
         	<string>export</string>
         	<key>signingStyle</key>
@@ -817,12 +921,13 @@ final class XcodePipeline: @unchecked Sendable {
         	<string>\(esc(teamId))</string>
         	<key>signingCertificate</key>
         	<string>\(esc(certificate))</string>
+        	<key>manageAppVersionAndBuildNumber</key>
+        	<false/>
         	<key>stripSwiftSymbols</key>
         	<true/>
         	<key>provisioningProfiles</key>
         	<dict>
-        		<key>\(esc(bundleId))</key>
-        		<string>\(esc(profile))</string>
+        \(entries)
         	</dict>
         </dict>
         </plist>
@@ -846,5 +951,200 @@ final class XcodePipeline: @unchecked Sendable {
         let dest = dir.appendingPathComponent("AuthKey_\(cred.keyId).p8")
         try FileManager.default.copyItem(atPath: cred.privateKeyPath, toPath: dest.path)
         return dir
+    }
+
+    func ipaDistributionMethod(_ ipa: String) throws -> String {
+        let metadataURL = URL(fileURLWithPath: ipa).deletingPathExtension().appendingPathExtension("export-metadata.json")
+        if let data = try? Data(contentsOf: metadataURL),
+           let meta = try? JSONDecoder().decode(ExportMetadata.self, from: data),
+           !meta.method.isEmpty {
+            return meta.method
+        }
+        guard let kind = try embeddedProfileKind(ipa) else {
+            throw BuildError.message(L10n.t(
+                "Could not read the provisioning profile inside the IPA.",
+                "读不到 IPA 里的描述文件。"
+            ))
+        }
+        return try Self.exportMethod(for: kind)
+    }
+
+    private func embeddedProfileKind(_ ipa: String) throws -> String? {
+        let listing = try runCapturing(["/usr/bin/unzip", "-Z1", ipa])
+        let lines = String(decoding: listing, as: UTF8.self).split(separator: "\n").map(String.init)
+        guard let entry = lines.first(where: { $0.hasSuffix("embedded.mobileprovision") && $0.contains(".app/") }) else {
+            return nil
+        }
+        let cms = try runCapturing(["/usr/bin/unzip", "-p", ipa, entry])
+        let temp = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".mobileprovision")
+        try cms.write(to: temp)
+        defer { try? FileManager.default.removeItem(at: temp) }
+        return try decodeProfile(temp.path)?.kind
+    }
+
+    static func signedProducts(from data: Data) -> [SignedProduct] {
+        guard let entries = jsonArray(from: data) else { return [] }
+        var products: [SignedProduct] = []
+        var seen = Set<String>()
+        for entry in entries {
+            let target = entry["target"] as? String ?? ""
+            if target.lowercased().contains("test") { continue }
+            let settings = stringSettings(entry["buildSettings"] as? [String: Any] ?? [:])
+            let type = settings["PRODUCT_TYPE"] ?? ""
+            guard type == "com.apple.product-type.application"
+                    || type.contains("app-extension")
+                    || type.contains("watch")
+                    || type.contains("on-demand-install") else { continue }
+            let bundleId = settings["PRODUCT_BUNDLE_IDENTIFIER"] ?? ""
+            guard isResolvedBundleID(bundleId), seen.insert(bundleId).inserted else { continue }
+            products.append(SignedProduct(
+                target: target,
+                bundleId: bundleId,
+                productType: type,
+                profileSpecifier: settings["PROVISIONING_PROFILE_SPECIFIER"] ?? settings["PROVISIONING_PROFILE"] ?? ""
+            ))
+        }
+        return products
+    }
+
+    static func assignProfiles(
+        _ products: [SignedProduct],
+        installed: [ProfileInfo],
+        teamId: String,
+        configuration: String,
+        identities: [SigningIdentity],
+        mainBundleId: String
+    ) -> [SignedProduct] {
+        products.map { raw in
+            var product = raw
+            let matches = matchProfiles(
+                installed,
+                bundleId: product.bundleId,
+                teamId: teamId,
+                specifier: product.profileSpecifier,
+                configuration: configuration
+            )
+            let chosen = defaultProfile(
+                in: matches,
+                specifier: product.profileSpecifier,
+                configuration: configuration,
+                identities: identities,
+                bundleId: product.bundleId
+            )
+            product.profileName = chosen?.value ?? ""
+            product.profileKind = chosen?.kind ?? ""
+            product.isMain = product.bundleId == mainBundleId
+            return product
+        }
+    }
+
+    static func profileMap(products: [SignedProduct], mainBundleId: String, mainProfile: String) -> [String: String] {
+        var map: [String: String] = [:]
+        if products.isEmpty, !mainBundleId.isEmpty, !mainProfile.isEmpty {
+            map[mainBundleId] = mainProfile
+            return map
+        }
+        for product in products {
+            let name = product.bundleId == mainBundleId ? mainProfile : product.profileName
+            if !name.isEmpty { map[product.bundleId] = name }
+        }
+        return map
+    }
+
+    static func makeOutputDirectory(for containerPath: String) throws -> URL {
+        let name = URL(fileURLWithPath: containerPath).deletingPathExtension().lastPathComponent
+        let safe = name.isEmpty ? "project" : name
+        let root = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/AppMeta Build", isDirectory: true)
+            .appendingPathComponent(safe, isDirectory: true)
+        cleanupCache(at: root, keepingLatest: 3, maxAgeDays: 7)
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        let dir = root.appendingPathComponent(formatter.string(from: Date()), isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+
+    static func cleanupCache(at root: URL, keepingLatest: Int, maxAgeDays: Int) {
+        let fm = FileManager.default
+        guard let urls = try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles]) else { return }
+        let dated = urls.map { url -> (URL, Date) in
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return (url, date)
+        }.sorted { $0.1 > $1.1 }
+        let cutoff = Date().addingTimeInterval(-Double(maxAgeDays) * 24 * 60 * 60)
+        for (index, item) in dated.enumerated() where index >= keepingLatest || item.1 < cutoff {
+            try? fm.removeItem(at: item.0)
+        }
+    }
+
+    static func readAppVersion(inArchive archive: String) -> (version: String, build: String) {
+        let apps = URL(fileURLWithPath: archive).appendingPathComponent("Products/Applications")
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: apps.path),
+              let app = names.first(where: { $0.hasSuffix(".app") }) else { return ("", "") }
+        let plist = apps.appendingPathComponent(app).appendingPathComponent("Info.plist")
+        guard let data = try? Data(contentsOf: plist),
+              let obj = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any] else {
+            return ("", "")
+        }
+        return (obj["CFBundleShortVersionString"] as? String ?? "", obj["CFBundleVersion"] as? String ?? "")
+    }
+
+    static func preserveSymbols(fromArchive archive: String, to outDir: URL) {
+        let source = URL(fileURLWithPath: archive).appendingPathComponent("dSYMs")
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: source.path, isDirectory: &isDir), isDir.boolValue else { return }
+        try? FileManager.default.copyItem(at: source, to: outDir.appendingPathComponent("dSYMs"))
+    }
+
+    static func incrementBuildNumber(containerPath: String, current: String) throws -> String {
+        guard let number = Int(current) else {
+            throw BuildError.message(L10n.t(
+                "Build number \"\(current)\" is not an integer.",
+                "Build 号 \"\(current)\" 不是整数。"
+            ))
+        }
+        let next = String(number + 1)
+        let pattern = #"CURRENT_PROJECT_VERSION = "?\#(NSRegularExpression.escapedPattern(for: current))"? *;"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else {
+            throw BuildError.message(L10n.t("Could not update the build number.", "无法更新 Build 号。"))
+        }
+        var changed = 0
+        for file in pbxprojFiles(containerPath) {
+            guard var text = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let range = NSRange(text.startIndex..., in: text)
+            let count = regex.numberOfMatches(in: text, range: range)
+            guard count > 0 else { continue }
+            text = regex.stringByReplacingMatches(in: text, range: range, withTemplate: "CURRENT_PROJECT_VERSION = \(next);")
+            try text.write(to: file, atomically: true, encoding: .utf8)
+            changed += count
+        }
+        guard changed > 0 else {
+            throw BuildError.message(L10n.t(
+                "CURRENT_PROJECT_VERSION \(current) was not found in the project.",
+                "工程里没有找到 CURRENT_PROJECT_VERSION \(current)。"
+            ))
+        }
+        return next
+    }
+
+    static func pbxprojFiles(_ containerPath: String) -> [URL] {
+        if containerPath.lowercased().hasSuffix(".xcodeproj") {
+            return [URL(fileURLWithPath: containerPath).appendingPathComponent("project.pbxproj")]
+        }
+        let parent = URL(fileURLWithPath: containerPath).deletingLastPathComponent()
+        let children = (try? FileManager.default.contentsOfDirectory(at: parent, includingPropertiesForKeys: nil)) ?? []
+        return children
+            .filter { $0.pathExtension == "xcodeproj" && $0.lastPathComponent != "Pods.xcodeproj" }
+            .map { $0.appendingPathComponent("project.pbxproj") }
+    }
+}
+
+private extension JSONEncoder {
+    static var pretty: JSONEncoder {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        return encoder
     }
 }

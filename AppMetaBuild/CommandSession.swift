@@ -42,6 +42,21 @@ enum LogDiagnostics {
         return nil
     }
 
+    static func versionConflictMessage(in text: String) -> String? {
+        let lowered = text.lowercased()
+        let mentionsVersion = lowered.contains("cfbundleversion") || lowered.contains("bundle version") || lowered.contains("build number")
+        let conflict = lowered.contains("must be higher")
+            || lowered.contains("already been used")
+            || lowered.contains("already exists")
+            || lowered.contains("redundant binary")
+            || lowered.contains("duplicate")
+        guard mentionsVersion && conflict else { return nil }
+        return L10n.t(
+            "This build number was already uploaded. Increment the build number and archive again.",
+            "这个 Build 号已经上传过。请把 Build 号加 1 后再 Archive。"
+        )
+    }
+
     static func tail(_ text: String, maxLines: Int) -> String {
         let lines = text
             .split(separator: "\n", omittingEmptySubsequences: false)

@@ -14,7 +14,10 @@ final class BuildEngine: ObservableObject {
     @Published var stage = ""
     @Published var busy = false
     @Published var artifact = ""
+    @Published var artifactMetadata: ExportMetadata?
     @Published var logFile = ""
+    @Published var marketingVersion = ""
+    @Published var buildNumber = ""
     @Published var lastError = ""
     @Published var wasCancelled = false
     @Published var credentials = Credentials()
@@ -32,12 +35,15 @@ final class BuildEngine: ObservableObject {
         guard let ins = inspect else { return [] }
         return XcodePipeline.profileGroups(in: ins.profiles, configuration: ins.configuration)
     }
-    var ready: Bool { assessment.ready }
+    var ready: Bool {
+        guard assessment.ready, let products = inspect?.products, !products.isEmpty else { return false }
+        return products.filter { !$0.isMain }.allSatisfy { !$0.profileName.isEmpty }
+    }
     var canUpload: Bool { credentials.isComplete }
     var selectedProfileInfo: ProfileInfo? {
         inspect?.profiles.first { $0.value == profile }
     }
-    var canUploadBuild: Bool { canUpload && (selectedProfileInfo?.isAppStore ?? false) }
+    var canUploadBuild: Bool { canUpload && artifactMetadata?.method == "app-store-connect" }
     var facts: String {
         guard let ins = inspect else { return "" }
         var parts: [String] = []
@@ -77,13 +83,12 @@ final class BuildEngine: ObservableObject {
     func chooseProject() {
         guard !busy else { return }
         let panel = NSOpenPanel()
-        panel.title = L10n.t("Select an .xcodeproj", "选择 .xcodeproj")
+        panel.title = L10n.t("Select an Xcode project or workspace", "选择 Xcode 工程或 workspace")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = true
-        if let ut = UTType(filenameExtension: "xcodeproj") {
-            panel.allowedContentTypes = [ut]
-        }
+        let types = ["xcodeproj", "xcworkspace"].compactMap { UTType(filenameExtension: $0) }
+        if !types.isEmpty { panel.allowedContentTypes = types }
         guard panel.runModal() == .OK, let url = panel.url else { return }
         projectPath = url.path
         runInspect()
@@ -101,7 +106,10 @@ final class BuildEngine: ObservableObject {
         let selectedScheme = scheme
         inspect = nil
         artifact = ""
+        artifactMetadata = nil
         logFile = ""
+        marketingVersion = ""
+        buildNumber = ""
         beginWork(clearLog: false, clearArtifact: false)
         let pipeline = self.pipeline
         pipeline.prepareForNewOperation()
@@ -114,6 +122,8 @@ final class BuildEngine: ObservableObject {
                     self.inspect = result
                     self.scheme = result.suggestedScheme
                     self.profile = result.selectedProfile?.value ?? ""
+                    self.marketingVersion = result.marketingVersion
+                    self.buildNumber = result.buildNumber
                     self.busy = false
                 }
             } catch {
@@ -146,6 +156,7 @@ final class BuildEngine: ObservableObject {
             profile: profile,
             profileKind: selectedProfileInfo?.kind ?? "",
             signingIdentity: signing.identityName,
+            products: ins.products,
             upload: upload,
             credentials: credentials
         )
@@ -164,12 +175,17 @@ final class BuildEngine: ObservableObject {
                     profile: request.profile,
                     profileKind: request.profileKind,
                     signingIdentity: request.signingIdentity,
+                    products: request.products,
                     onLog: sink.log,
                     onStage: sink.stage
                 )
+                let metadata = Self.readMetadata(at: product.metadataPath)
                 await MainActor.run { [weak self] in
                     self?.artifact = product.ipaPath
                     self?.logFile = product.logPath
+                    self?.artifactMetadata = metadata
+                    if !product.version.isEmpty { self?.marketingVersion = product.version }
+                    if !product.build.isEmpty { self?.buildNumber = product.build }
                 }
                 if request.upload {
                     try pipeline.upload(
@@ -244,7 +260,24 @@ final class BuildEngine: ObservableObject {
         if clearLog { resetLog() }
         if clearArtifact {
             artifact = ""
+            artifactMetadata = nil
             logFile = ""
+        }
+    }
+
+    func incrementBuildNumber() {
+        guard let ins = inspect, !busy else { return }
+        let current = buildNumber
+        guard !current.isEmpty else { return }
+        do {
+            let next = try XcodePipeline.incrementBuildNumber(containerPath: ins.projectPath, current: current)
+            buildNumber = next
+            wasCancelled = false
+            lastError = ""
+            stage = L10n.t("Build number changed from \(current) to \(next).", "Build 号已从 \(current) 改为 \(next)。")
+            appendLog(stage)
+        } catch {
+            lastError = error.localizedDescription
         }
     }
 
@@ -257,7 +290,16 @@ final class BuildEngine: ObservableObject {
             return
         }
         wasCancelled = false
+        if let conflict = LogDiagnostics.versionConflictMessage(in: log) {
+            lastError = conflict
+            return
+        }
         lastError = LogDiagnostics.summarizeFailure(in: log) ?? error.localizedDescription
+    }
+
+    nonisolated private static func readMetadata(at path: String) -> ExportMetadata? {
+        guard !path.isEmpty, let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else { return nil }
+        return try? JSONDecoder().decode(ExportMetadata.self, from: data)
     }
 
     private func resetLog() {
@@ -303,6 +345,7 @@ private struct ExportRequest: Sendable {
     var profile: String
     var profileKind: String
     var signingIdentity: String
+    var products: [SignedProduct]
     var upload: Bool
     var credentials: Credentials
 }

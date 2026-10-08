@@ -79,6 +79,10 @@ struct InspectResult {
     var bundleId = ""
     var teamId = ""
     var productName = ""
+    var marketingVersion = ""
+    var buildNumber = ""
+    var containerKind = "project"
+    var products: [SignedProduct] = []
     var signingStyle = ""
     var codeSignIdentity = ""
     var profileSpecifier = ""
@@ -108,6 +112,28 @@ struct Credentials: Codable, Equatable, Sendable {
 struct ArchiveProduct: Equatable, Sendable {
     var ipaPath: String
     var logPath: String
+    var version = ""
+    var build = ""
+    var metadataPath = ""
+}
+
+struct SignedProduct: Hashable, Identifiable, Codable, Sendable {
+    var id: String { bundleId }
+    var target = ""
+    var bundleId = ""
+    var productType = ""
+    var profileSpecifier = ""
+    var profileName = ""
+    var profileKind = ""
+    var isMain = false
+}
+
+struct ExportMetadata: Codable, Equatable, Sendable {
+    var method = ""
+    var bundleId = ""
+    var version = ""
+    var build = ""
+    var profile = ""
 }
 
 enum BuildError: LocalizedError, Equatable {
