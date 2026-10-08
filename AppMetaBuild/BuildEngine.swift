@@ -76,7 +76,20 @@ final class BuildEngine: ObservableObject {
     func choosePrivateKey() {
         guard !busy else { return }
         creds.credentials = credentials
-        creds.choosePrivateKey()
+        do {
+            try creds.choosePrivateKey()
+            credentials = creds.credentials
+            lastError = ""
+        } catch {
+            credentials = creds.credentials
+            lastError = error.localizedDescription
+        }
+    }
+
+    func removePrivateKey() {
+        guard !busy else { return }
+        creds.credentials = credentials
+        creds.removePrivateKey()
         credentials = creds.credentials
     }
 

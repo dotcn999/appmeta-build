@@ -101,11 +101,48 @@ struct InspectResult {
 struct Credentials: Codable, Equatable, Sendable {
     var keyId = ""
     var issuerId = ""
-    var privateKeyPath = ""
+    var storedKeyId = ""
+    var hasPrivateKey = false
+    /// Read from older config files so the key can be moved into the keychain. Never written back.
+    var legacyPrivateKeyPath = ""
+
     var isComplete: Bool {
-        !keyId.trimmingCharacters(in: .whitespaces).isEmpty
-            && !issuerId.trimmingCharacters(in: .whitespaces).isEmpty
-            && FileManager.default.isReadableFile(atPath: privateKeyPath)
+        Self.isValidKeyID(keyId)
+            && keyId == storedKeyId
+            && Self.isValidIssuerID(issuerId)
+            && hasPrivateKey
+    }
+
+    static func isValidKeyID(_ value: String) -> Bool {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.count == 10 && trimmed.allSatisfy { $0.isLetter || $0.isNumber }
+    }
+
+    static func isValidIssuerID(_ value: String) -> Bool {
+        UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case keyId, issuerId, storedKeyId, hasPrivateKey, privateKeyPath
+    }
+
+    init() {}
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        keyId = try container.decodeIfPresent(String.self, forKey: .keyId) ?? ""
+        issuerId = try container.decodeIfPresent(String.self, forKey: .issuerId) ?? ""
+        storedKeyId = try container.decodeIfPresent(String.self, forKey: .storedKeyId) ?? ""
+        hasPrivateKey = try container.decodeIfPresent(Bool.self, forKey: .hasPrivateKey) ?? false
+        legacyPrivateKeyPath = try container.decodeIfPresent(String.self, forKey: .privateKeyPath) ?? ""
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(keyId, forKey: .keyId)
+        try container.encode(issuerId, forKey: .issuerId)
+        try container.encode(storedKeyId, forKey: .storedKeyId)
+        try container.encode(hasPrivateKey, forKey: .hasPrivateKey)
     }
 }
 

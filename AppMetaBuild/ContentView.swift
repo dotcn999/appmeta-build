@@ -62,21 +62,32 @@ struct ContentView: View {
                 .disabled(engine.busy)
             labeledField("Issuer ID", text: $engine.credentials.issuerId)
                 .disabled(engine.busy)
+            if !engine.credentials.keyId.isEmpty && !Credentials.isValidKeyID(engine.credentials.keyId) {
+                Text(L10n.t("Key ID must be 10 letters or digits.", "Key ID 必须是 10 位字母或数字。"))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
+            if !engine.credentials.issuerId.isEmpty && !Credentials.isValidIssuerID(engine.credentials.issuerId) {
+                Text(L10n.t("Issuer ID must be a UUID.", "Issuer ID 必须是 UUID。"))
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+            }
             HStack {
                 Button(L10n.t("Choose .p8", "选择 .p8")) { engine.choosePrivateKey() }
                     .disabled(engine.busy)
+                Button(L10n.t("Remove key", "移除密钥")) { engine.removePrivateKey() }
+                    .disabled(engine.busy || !engine.credentials.hasPrivateKey)
                 Spacer()
                 statusDot(ok: engine.canUpload,
                           okText: L10n.t("Key ready", "密钥已就绪"),
                           badText: L10n.t("Key incomplete", "密钥未配齐"))
             }
-            Text(engine.credentials.privateKeyPath.isEmpty
-                 ? L10n.t("No private key selected.", "尚未选择私钥。")
-                 : engine.credentials.privateKeyPath)
+            Text(engine.credentials.hasPrivateKey
+                 ? L10n.t("Private key is in the login keychain.", "私钥已保存在登录钥匙串。")
+                 : L10n.t("No private key saved.", "尚未保存私钥。"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
-                .truncationMode(.middle)
+                .lineLimit(2)
         }
         .padding(12)
         .background(cardBackground)

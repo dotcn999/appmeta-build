@@ -946,10 +946,24 @@ final class XcodePipeline: @unchecked Sendable {
     }
 
     static func prepareKeyDir(_ cred: Credentials) throws -> URL {
+        guard Credentials.isValidKeyID(cred.keyId), Credentials.isValidIssuerID(cred.issuerId) else {
+            throw BuildError.message(L10n.t(
+                "Key ID must be 10 letters or digits, and Issuer ID must be a UUID.",
+                "Key ID 必须是 10 位字母或数字，Issuer ID 必须是 UUID。"
+            ))
+        }
+        guard let pem = KeychainStore.load(keyId: cred.keyId) else {
+            throw BuildError.message(L10n.t(
+                "The private key is not in the login keychain.",
+                "登录钥匙串里没有这把私钥。"
+            ))
+        }
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("appmeta-build-keys-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
         let dest = dir.appendingPathComponent("AuthKey_\(cred.keyId).p8")
-        try FileManager.default.copyItem(atPath: cred.privateKeyPath, toPath: dest.path)
+        try pem.write(to: dest, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: dest.path)
         return dir
     }
 
