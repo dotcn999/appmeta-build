@@ -49,6 +49,8 @@ enum KeychainStore {
 }
 
 final class CredentialsStore: ObservableObject {
+    static let shared = CredentialsStore()
+
     @Published var credentials = Credentials()
 
     private var supportDirectory: URL {
@@ -61,7 +63,7 @@ final class CredentialsStore: ObservableObject {
     private var fileURL: URL { supportDirectory.appendingPathComponent("config.json") }
     private var legacyKeysDirectory: URL { supportDirectory.appendingPathComponent("private_keys", isDirectory: true) }
 
-    init() { load() }
+    private init() { load() }
 
     func load() {
         guard let data = try? Data(contentsOf: fileURL),
@@ -74,9 +76,13 @@ final class CredentialsStore: ObservableObject {
     }
 
     func save() {
-        credentials.keyId = credentials.keyId.trimmingCharacters(in: .whitespacesAndNewlines)
-        credentials.issuerId = credentials.issuerId.trimmingCharacters(in: .whitespacesAndNewlines)
-        credentials.legacyPrivateKeyPath = ""
+        var next = credentials
+        next.keyId = next.keyId.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.issuerId = next.issuerId.trimmingCharacters(in: .whitespacesAndNewlines)
+        next.legacyPrivateKeyPath = ""
+        if next != credentials {
+            credentials = next
+        }
         guard let data = try? JSONEncoder().encode(credentials) else { return }
         do {
             try data.write(to: fileURL, options: .atomic)

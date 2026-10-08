@@ -166,7 +166,7 @@ final class XcodePipeline: @unchecked Sendable {
         emit("Team \(teamId)")
         emit("Identity \(signingIdentity)")
         emit("Profile \(profile)")
-        onStage("archive", L10n.t("Archiving \(config). This can take several minutes.", "正在 Archive \(config)，可能需要几分钟。"))
+        onStage("archive", config)
         emit("xcodebuild archive \(container.flag) \(container.path) -scheme \(scheme) -configuration \(config)")
         let workDirectory = URL(fileURLWithPath: container.path).deletingLastPathComponent().path
         var archiveArguments = [
@@ -186,7 +186,7 @@ final class XcodePipeline: @unchecked Sendable {
         try runStreaming(onLog: emit, arguments: archiveArguments, directory: workDirectory)
         try checkCancelled()
 
-        onStage("export", L10n.t("Exporting a manually signed IPA.", "正在导出手动签名 IPA。"))
+        onStage("export", "")
         emit("xcodebuild -exportArchive")
         try runStreaming(onLog: emit, arguments: [
             "/usr/bin/xcodebuild", "-exportArchive",
@@ -234,7 +234,7 @@ final class XcodePipeline: @unchecked Sendable {
                 "只有 App Store IPA 可以上传。"
             ))
         }
-        onStage("upload", L10n.t("Uploading IPA to App Store Connect.", "正在上传 IPA 到 App Store Connect。"))
+        onStage("upload", "")
         let transporterPath = try locateTransporter()
         try checkCancelled()
         let keyDir = try Self.prepareKeyDir(credentials)
@@ -247,10 +247,7 @@ final class XcodePipeline: @unchecked Sendable {
             logFile: logFile,
             onLog: onLog
         )
-        onStage("uploaded", L10n.t(
-            "Delivery succeeded. Apple still needs to process the build before it appears in App Store Connect.",
-            "投递成功。Apple 还要处理构建，之后才会出现在 App Store Connect。"
-        ))
+        onStage("uploaded", "")
     }
 
     func locateTransporter() throws -> String {
@@ -769,78 +766,44 @@ final class XcodePipeline: @unchecked Sendable {
     static func assess(inspect: InspectResult, profileValue: String, currentPath: String) -> SigningAssessment {
         var result = SigningAssessment()
         if !sameProjectPath(currentPath, inspect.projectPath) {
-            result.warnings.append(L10n.t(
-                "The project path changed. Inspect it again before archiving.",
-                "工程路径已改变，请重新识别后再 Archive。"
-            ))
+            result.warnings.append(.pathChanged)
             return result
         }
         if !isResolvedBundleID(inspect.bundleId) {
-            result.warnings.append(inspect.bundleId.isEmpty
-                ? L10n.t("No expanded Bundle ID was found for this scheme.", "这个 scheme 没有读到已展开的 Bundle ID。")
-                : L10n.t("Bundle ID is not expanded: \(inspect.bundleId)", "Bundle ID 没有展开：\(inspect.bundleId)"))
+            result.warnings.append(inspect.bundleId.isEmpty ? .bundleMissing : .bundleUnexpanded(inspect.bundleId))
         }
         if !isResolvedTeamID(inspect.teamId) {
-            result.warnings.append(inspect.teamId.isEmpty
-                ? L10n.t("No expanded Team ID was found for this scheme.", "这个 scheme 没有读到已展开的 Team ID。")
-                : L10n.t("Team ID is not expanded: \(inspect.teamId)", "Team ID 没有展开：\(inspect.teamId)"))
+            result.warnings.append(inspect.teamId.isEmpty ? .teamMissing : .teamUnexpanded(inspect.teamId))
         }
         guard let profile = inspect.profiles.first(where: { $0.value == profileValue }) else {
-            result.warnings.append(L10n.t(
-                "No matching provisioning profile is installed for this Bundle ID.",
-                "本机没有和这个 Bundle ID 匹配的描述文件。"
-            ))
+            result.warnings.append(.noProfile)
             return result
         }
         result.expectsDevelopment = profile.kind == "development"
         if !profile.installed {
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" is named by the project but is not installed on this Mac.",
-                "工程指定了描述文件 \"\(profile.name)\"，但本机没有安装。"
-            ))
+            result.warnings.append(.profileMissing(profile.name))
         } else if profile.expired {
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" has expired.",
-                "描述文件 \"\(profile.name)\" 已过期。"
-            ))
+            result.warnings.append(.profileExpired(profile.name))
         } else if !profile.platformKnown {
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" does not say which platform it is for.",
-                "描述文件 \"\(profile.name)\" 没有标明平台。"
-            ))
+            result.warnings.append(.profilePlatformUnknown(profile.name))
         } else if !profile.supportsIOS {
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" is not an iOS profile.",
-                "描述文件 \"\(profile.name)\" 不是 iOS 描述文件。"
-            ))
+            result.warnings.append(.profileNotIOS(profile.name))
         }
         if let identity = matchingIdentity(profile: profile, identities: inspect.identities) {
             result.identityName = identity.name
             result.certificateFound = true
         } else if profile.installed {
-            let expected = result.expectsDevelopment
-                ? L10n.t("Apple Development", "Apple Development")
-                : L10n.t("Apple Distribution", "Apple Distribution")
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" does not include a \(expected) certificate from this keychain.",
-                "描述文件 \"\(profile.name)\" 不包含本机钥匙串里的 \(expected) 证书。"
-            ))
+            result.warnings.append(.certificateMissing(name: profile.name, development: result.expectsDevelopment))
         }
         if let legacy = legacyIdentityWarning(projectIdentity: inspect.codeSignIdentity, expectsDevelopment: result.expectsDevelopment) {
             result.warnings.append(legacy)
         }
         if inspect.signingStyle.lowercased() == "automatic" {
-            result.warnings.append(L10n.t(
-                "The project uses Automatic signing. Archive will pass manual signing on the command line and will not edit the project.",
-                "工程使用 Automatic 签名。Archive 会在命令行改用手动签名，不会修改工程文件。"
-            ))
+            result.warnings.append(.automaticSigning)
         }
         let bundleAligned = bundleMatches(profile.bundleId, inspect.bundleId)
         if profile.installed && isResolvedBundleID(inspect.bundleId) && !bundleAligned {
-            result.warnings.append(L10n.t(
-                "Provisioning profile \"\(profile.name)\" does not match Bundle ID \(inspect.bundleId).",
-                "描述文件 \"\(profile.name)\" 和 Bundle ID \(inspect.bundleId) 不匹配。"
-            ))
+            result.warnings.append(.bundleMismatch(profile: profile.name, bundle: inspect.bundleId))
         }
         result.ready = isResolvedBundleID(inspect.bundleId)
             && isResolvedTeamID(inspect.teamId)
@@ -852,17 +815,14 @@ final class XcodePipeline: @unchecked Sendable {
         return result
     }
 
-    static func legacyIdentityWarning(projectIdentity: String, expectsDevelopment: Bool) -> String? {
+    static func legacyIdentityWarning(projectIdentity: String, expectsDevelopment: Bool) -> Notice? {
         let identity = projectIdentity.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !identity.isEmpty else { return nil }
         let legacy = expectsDevelopment
             ? identity.hasPrefix("iphone developer")
             : identity.hasPrefix("iphone distribution")
         guard legacy else { return nil }
-        return L10n.t(
-            "The project still uses the legacy identity \"\(projectIdentity)\". This archive will use the matching certificate from the keychain instead.",
-            "工程还在用旧的证书名 \"\(projectIdentity)\"。本次 Archive 会改用钥匙串里匹配到的证书。"
-        )
+        return .legacyIdentity(projectIdentity)
     }
 
     static func profileGroups(in profiles: [ProfileInfo], configuration: String) -> [ProfileGroup] {

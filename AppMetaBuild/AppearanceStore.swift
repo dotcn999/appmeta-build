@@ -25,13 +25,22 @@ final class AppearanceStore: ObservableObject {
     }
 
     var isChinese: Bool {
-        switch language {
-        case .system:
-            return Locale.current.language.languageCode?.identifier == "zh"
-        case .chinese:
-            return true
+        Self.prefersSimplifiedChinese(selection: language, locale: .current)
+    }
+
+    /// Traditional Chinese stays in English until Traditional copy exists.
+    static func prefersSimplifiedChinese(selection: AppLanguage, locale: Locale) -> Bool {
+        switch selection {
         case .english:
             return false
+        case .chinese:
+            return true
+        case .system:
+            let language = locale.language
+            guard language.languageCode?.identifier == "zh" else { return false }
+            if language.script?.identifier == "Hant" { return false }
+            if let region = language.region?.identifier, ["TW", "HK", "MO"].contains(region) { return false }
+            return true
         }
     }
 

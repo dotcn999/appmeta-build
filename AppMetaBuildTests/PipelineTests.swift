@@ -243,6 +243,38 @@ final class PipelineTests: XCTestCase {
         XCTAssertTrue(String(decoding: output.stderr, as: UTF8.self).contains("trouble"))
     }
 
+    func testTraditionalChineseStaysEnglish() {
+        XCTAssertFalse(AppearanceStore.prefersSimplifiedChinese(selection: .system, locale: Locale(identifier: "zh-Hant")))
+        XCTAssertFalse(AppearanceStore.prefersSimplifiedChinese(selection: .system, locale: Locale(identifier: "zh-TW")))
+        XCTAssertFalse(AppearanceStore.prefersSimplifiedChinese(selection: .system, locale: Locale(identifier: "zh-HK")))
+        XCTAssertTrue(AppearanceStore.prefersSimplifiedChinese(selection: .system, locale: Locale(identifier: "zh-Hans")))
+        XCTAssertTrue(AppearanceStore.prefersSimplifiedChinese(selection: .system, locale: Locale(identifier: "zh-CN")))
+        XCTAssertFalse(AppearanceStore.prefersSimplifiedChinese(selection: .english, locale: Locale(identifier: "zh-Hans")))
+        XCTAssertTrue(AppearanceStore.prefersSimplifiedChinese(selection: .chinese, locale: Locale(identifier: "en")))
+    }
+
+    func testWarningTextFollowsLanguage() {
+        let previous = AppearanceStore.shared.language
+        defer { AppearanceStore.shared.language = previous }
+        AppearanceStore.shared.language = .english
+        XCTAssertTrue(Notice.profileExpired("Demo").text.contains("expired"))
+        AppearanceStore.shared.language = .chinese
+        XCTAssertTrue(Notice.profileExpired("Demo").text.contains("过期"))
+    }
+
+    @MainActor
+    func testSecondBuildIsRejected() {
+        let gate = BuildGate()
+        let first = UUID()
+        let second = UUID()
+        XCTAssertTrue(gate.begin(first))
+        XCTAssertFalse(gate.begin(second))
+        XCTAssertTrue(gate.isBusy)
+        gate.end(first)
+        XCTAssertFalse(gate.isBusy)
+        XCTAssertTrue(gate.begin(second))
+    }
+
     func testKeyIDRejectsPathCharacters() {
         XCTAssertFalse(Credentials.isValidKeyID("../secret"))
         XCTAssertFalse(Credentials.isValidKeyID("short"))

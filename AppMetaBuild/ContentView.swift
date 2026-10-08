@@ -3,6 +3,8 @@ import AppKit
 
 struct ContentView: View {
     @StateObject private var engine = BuildEngine()
+    @ObservedObject private var credentialsStore = CredentialsStore.shared
+    @ObservedObject private var builds = BuildGate.shared
     @EnvironmentObject private var appearance: AppearanceStore
 
     var body: some View {
@@ -14,7 +16,7 @@ struct ContentView: View {
         }
         .navigationTitle("AppMeta Build")
         .toolbar { toolbarItems }
-        .onChange(of: engine.credentials) { _ in engine.saveCredentials() }
+        .onChange(of: credentialsStore.credentials) { _ in credentialsStore.save() }
     }
 
     @ToolbarContentBuilder
@@ -58,16 +60,16 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle(L10n.t("API Key", "API Key"),
                          subtitle: L10n.t("Stored only on this Mac.", "仅保存在这台 Mac 上。"))
-            labeledField("Key ID", text: $engine.credentials.keyId)
+            labeledField("Key ID", text: $credentialsStore.credentials.keyId)
                 .disabled(engine.busy)
-            labeledField("Issuer ID", text: $engine.credentials.issuerId)
+            labeledField("Issuer ID", text: $credentialsStore.credentials.issuerId)
                 .disabled(engine.busy)
-            if !engine.credentials.keyId.isEmpty && !Credentials.isValidKeyID(engine.credentials.keyId) {
+            if !credentialsStore.credentials.keyId.isEmpty && !Credentials.isValidKeyID(credentialsStore.credentials.keyId) {
                 Text(L10n.t("Key ID must be 10 letters or digits.", "Key ID 必须是 10 位字母或数字。"))
                     .font(.caption)
                     .foregroundStyle(.orange)
             }
-            if !engine.credentials.issuerId.isEmpty && !Credentials.isValidIssuerID(engine.credentials.issuerId) {
+            if !credentialsStore.credentials.issuerId.isEmpty && !Credentials.isValidIssuerID(credentialsStore.credentials.issuerId) {
                 Text(L10n.t("Issuer ID must be a UUID.", "Issuer ID 必须是 UUID。"))
                     .font(.caption)
                     .foregroundStyle(.orange)
@@ -76,13 +78,13 @@ struct ContentView: View {
                 Button(L10n.t("Choose .p8", "选择 .p8")) { engine.choosePrivateKey() }
                     .disabled(engine.busy)
                 Button(L10n.t("Remove key", "移除密钥")) { engine.removePrivateKey() }
-                    .disabled(engine.busy || !engine.credentials.hasPrivateKey)
+                    .disabled(engine.busy || !credentialsStore.credentials.hasPrivateKey)
                 Spacer()
                 statusDot(ok: engine.canUpload,
                           okText: L10n.t("Key ready", "密钥已就绪"),
                           badText: L10n.t("Key incomplete", "密钥未配齐"))
             }
-            Text(engine.credentials.hasPrivateKey
+            Text(credentialsStore.credentials.hasPrivateKey
                  ? L10n.t("Private key is in the login keychain.", "私钥已保存在登录钥匙串。")
                  : L10n.t("No private key saved.", "尚未保存私钥。"))
                 .font(.caption)
@@ -99,13 +101,13 @@ struct ContentView: View {
                          subtitle: L10n.t("Select a .xcodeproj, then inspect.", "选择 .xcodeproj，然后识别。"))
             TextField(L10n.t("Project path", "工程路径"), text: $engine.projectPath)
                 .textFieldStyle(.roundedBorder)
-                .disabled(engine.busy)
+                .disabled(builds.isBusy)
             HStack {
                 Button(L10n.t("Choose…", "选择…")) { engine.chooseProject() }
-                    .disabled(engine.busy)
+                    .disabled(builds.isBusy)
                 Button(L10n.t("Inspect", "识别工程")) { engine.runInspect() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(engine.projectPath.isEmpty || engine.busy)
+                    .disabled(engine.projectPath.isEmpty || builds.isBusy)
                 Spacer()
             }
         }
@@ -119,7 +121,7 @@ struct ContentView: View {
                          subtitle: L10n.t("Bundle ID follows the selected scheme. Profiles are installed on this Mac. ★ is set in Xcode.", "Bundle ID 随所选 Scheme 变化。描述文件来自本机已安装的 Provisioning Profile。★ 表示工程里已指定。"))
             if let ins = engine.inspect {
                 labeledPicker(L10n.t("Scheme", "Scheme"), selection: $engine.scheme, options: ins.schemes)
-                    .disabled(engine.busy)
+                    .disabled(builds.isBusy)
                     .onChange(of: engine.scheme) { engine.handleSchemeChange($0) }
                 Picker(L10n.t("Profile", "描述文件"), selection: $engine.profile) {
                     if ins.profiles.isEmpty {
@@ -156,8 +158,8 @@ struct ContentView: View {
                 factRow(L10n.t("Style", "方式"), ins.signingStyle)
                 certRow
                 if !engine.assessment.warnings.isEmpty {
-                    ForEach(engine.assessment.warnings, id: \.self) { w in
-                        Label(w, systemImage: "exclamationmark.triangle.fill")
+                    ForEach(engine.assessment.warnings, id: \.self) { notice in
+                        Label(notice.text, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
                             .foregroundStyle(.orange)
                             .fixedSize(horizontal: false, vertical: true)
@@ -201,20 +203,20 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .controlSize(.large)
-            .disabled(!engine.ready || !engine.canUploadBuild || engine.busy)
+            .disabled(!engine.ready || !engine.canUploadBuild || builds.isBusy)
 
             HStack(spacing: 8) {
-                actionGridButton(L10n.t("Export IPA", "导出 IPA"), disabled: !engine.ready || engine.busy) {
+                actionGridButton(L10n.t("Export IPA", "导出 IPA"), disabled: !engine.ready || builds.isBusy) {
                     engine.runExport(upload: false)
                 }
-                actionGridButton(L10n.t("Upload IPA", "上传 IPA"), disabled: engine.artifact.isEmpty || !engine.canUploadBuild || engine.busy) {
+                actionGridButton(L10n.t("Upload IPA", "上传 IPA"), disabled: engine.artifact.isEmpty || !engine.canUploadBuild || builds.isBusy) {
                     engine.runUpload()
                 }
             }
             HStack(spacing: 8) {
                 actionGridButton(
                     L10n.t("Build +1", "Build 号 +1"),
-                    disabled: engine.busy || engine.inspect == nil || Int(engine.buildNumber) == nil
+                    disabled: builds.isBusy || engine.inspect == nil || Int(engine.buildNumber) == nil
                 ) {
                     engine.incrementBuildNumber()
                 }
@@ -255,6 +257,18 @@ struct ContentView: View {
                     .font(.subheadline.weight(.semibold))
                 if engine.busy { ProgressView().controlSize(.small) }
                 Spacer()
+            }
+            if !engine.artifact.isEmpty {
+                Text(engine.artifact)
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button(L10n.t("Copy path", "复制路径")) {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(engine.artifact, forType: .string)
+                }
+                .controlSize(.small)
             }
             if !engine.lastError.isEmpty {
                 Text(engine.lastError)
@@ -306,10 +320,18 @@ struct ContentView: View {
     }
 
     private var statusTitle: String {
-        if engine.busy { return engine.stage.isEmpty ? L10n.t("Working…", "进行中…") : engine.stage }
+        if engine.busy { return engine.stageText.isEmpty ? L10n.t("Working…", "进行中…") : engine.stageText }
         if engine.wasCancelled { return L10n.t("Cancelled.", "已取消。") }
-        if !engine.lastError.isEmpty { return L10n.t("Failed", "失败") }
-        if !engine.artifact.isEmpty { return engine.stage.isEmpty ? L10n.t("IPA ready", "IPA 已就绪") : engine.stage }
+        if !engine.lastError.isEmpty {
+            if engine.failureKind == "upload" {
+                return L10n.t("IPA is ready, but upload failed", "IPA 已就绪，上传失败")
+            }
+            if engine.failureKind == "archive" {
+                return L10n.t("Archive failed", "Archive 失败")
+            }
+            return L10n.t("Failed", "失败")
+        }
+        if !engine.artifact.isEmpty { return engine.stageText.isEmpty ? L10n.t("IPA ready", "IPA 已就绪") : engine.stageText }
         if engine.ready { return L10n.t("Ready to archive", "可以开始 Archive") }
         return L10n.t("Idle", "空闲")
     }

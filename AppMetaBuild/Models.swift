@@ -55,9 +55,84 @@ struct SigningIdentity: Hashable, Sendable {
     var line = ""
 }
 
+enum Notice: Hashable {
+    case pathChanged
+    case bundleMissing
+    case bundleUnexpanded(String)
+    case teamMissing
+    case teamUnexpanded(String)
+    case noProfile
+    case profileMissing(String)
+    case profileExpired(String)
+    case profilePlatformUnknown(String)
+    case profileNotIOS(String)
+    case certificateMissing(name: String, development: Bool)
+    case legacyIdentity(String)
+    case automaticSigning
+    case bundleMismatch(profile: String, bundle: String)
+
+    var text: String {
+        switch self {
+        case .pathChanged:
+            return L10n.t(
+                "The project path changed. Inspect it again before archiving.",
+                "工程路径已改变，请重新识别后再 Archive。"
+            )
+        case .bundleMissing:
+            return L10n.t("No expanded Bundle ID was found for this scheme.", "这个 scheme 没有读到已展开的 Bundle ID。")
+        case .bundleUnexpanded(let value):
+            return L10n.t("Bundle ID is not expanded: \(value)", "Bundle ID 没有展开：\(value)")
+        case .teamMissing:
+            return L10n.t("No expanded Team ID was found for this scheme.", "这个 scheme 没有读到已展开的 Team ID。")
+        case .teamUnexpanded(let value):
+            return L10n.t("Team ID is not expanded: \(value)", "Team ID 没有展开：\(value)")
+        case .noProfile:
+            return L10n.t(
+                "No matching provisioning profile is installed for this Bundle ID.",
+                "本机没有和这个 Bundle ID 匹配的描述文件。"
+            )
+        case .profileMissing(let name):
+            return L10n.t(
+                "Provisioning profile \"\(name)\" is named by the project but is not installed on this Mac.",
+                "工程指定了描述文件 \"\(name)\"，但本机没有安装。"
+            )
+        case .profileExpired(let name):
+            return L10n.t("Provisioning profile \"\(name)\" has expired.", "描述文件 \"\(name)\" 已过期。")
+        case .profilePlatformUnknown(let name):
+            return L10n.t(
+                "Provisioning profile \"\(name)\" does not say which platform it is for.",
+                "描述文件 \"\(name)\" 没有标明平台。"
+            )
+        case .profileNotIOS(let name):
+            return L10n.t("Provisioning profile \"\(name)\" is not an iOS profile.", "描述文件 \"\(name)\" 不是 iOS 描述文件。")
+        case .certificateMissing(let name, let development):
+            let expected = development ? "Apple Development" : "Apple Distribution"
+            return L10n.t(
+                "Provisioning profile \"\(name)\" does not include a \(expected) certificate from this keychain.",
+                "描述文件 \"\(name)\" 不包含本机钥匙串里的 \(expected) 证书。"
+            )
+        case .legacyIdentity(let name):
+            return L10n.t(
+                "The project still uses the legacy identity \"\(name)\". This archive will use the matching certificate from the keychain instead.",
+                "工程还在用旧的证书名 \"\(name)\"。本次 Archive 会改用钥匙串里匹配到的证书。"
+            )
+        case .automaticSigning:
+            return L10n.t(
+                "The project uses Automatic signing. Archive will pass manual signing on the command line and will not edit the project.",
+                "工程使用 Automatic 签名。Archive 会在命令行改用手动签名，不会修改工程文件。"
+            )
+        case .bundleMismatch(let profile, let bundle):
+            return L10n.t(
+                "Provisioning profile \"\(profile)\" does not match Bundle ID \(bundle).",
+                "描述文件 \"\(profile)\" 和 Bundle ID \(bundle) 不匹配。"
+            )
+        }
+    }
+}
+
 struct SigningAssessment: Equatable {
     var ready = false
-    var warnings: [String] = []
+    var warnings: [Notice] = []
     var identityName = ""
     var expectsDevelopment = false
     var certificateFound = false
@@ -91,7 +166,7 @@ struct InspectResult {
     var identities: [SigningIdentity] = []
     var profiles: [ProfileInfo] = []
     var selectedProfile: ProfileInfo?
-    var warnings: [String] = []
+    var warnings: [Notice] = []
     var ready = false
     var usesDevelopmentSigning: Bool {
         configuration.lowercased().contains("debug")
