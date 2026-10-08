@@ -16,6 +16,7 @@
 		A10000000000000000000028 /* AppearanceStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000A /* AppearanceStore.swift */; };
 		A10000000000000000000029 /* CommandSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000000B /* CommandSession.swift */; };
 		A10000000000000000000027 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000007 /* Assets.xcassets */; };
+		B20000000000000000000021 /* PipelineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B20000000000000000000001 /* PipelineTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -31,10 +32,19 @@
 		A10000000000000000000008 /* AppMetaBuild.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AppMetaBuild.entitlements; sourceTree = "<group>"; };
 		A10000000000000000000009 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000000000000000000015 /* AppMetaBuild.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AppMetaBuild.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		B20000000000000000000001 /* PipelineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PipelineTests.swift; sourceTree = "<group>"; };
+		B20000000000000000000015 /* AppMetaBuildTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = AppMetaBuildTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		A10000000000000000000031 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		B20000000000000000000031 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -48,6 +58,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000041 /* AppMetaBuild */,
+				B20000000000000000000040 /* AppMetaBuildTests */,
 				A10000000000000000000042 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -74,8 +85,17 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000015 /* AppMetaBuild.app */,
+				B20000000000000000000015 /* AppMetaBuildTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		B20000000000000000000040 /* AppMetaBuildTests */ = {
+			isa = PBXGroup;
+			children = (
+				B20000000000000000000001 /* PipelineTests.swift */,
+			);
+			path = AppMetaBuildTests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -98,6 +118,23 @@
 			productReference = A10000000000000000000015 /* AppMetaBuild.app */;
 			productType = "com.apple.product-type.application";
 		};
+		B20000000000000000000050 /* AppMetaBuildTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = B20000000000000000000070 /* Build configuration list for PBXNativeTarget "AppMetaBuildTests" */;
+			buildPhases = (
+				B20000000000000000000051 /* Sources */,
+				B20000000000000000000031 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				B20000000000000000000081 /* PBXTargetDependency */,
+			);
+			name = AppMetaBuildTests;
+			productName = AppMetaBuildTests;
+			productReference = B20000000000000000000015 /* AppMetaBuildTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -110,6 +147,10 @@
 				TargetAttributes = {
 					A10000000000000000000050 = {
 						CreatedOnToolsVersion = 15.0;
+					};
+					B20000000000000000000050 = {
+						CreatedOnToolsVersion = 15.0;
+						TestTargetID = A10000000000000000000050;
 					};
 				};
 			};
@@ -128,6 +169,7 @@
 			projectRoot = "";
 			targets = (
 				A10000000000000000000050 /* AppMetaBuild */,
+				B20000000000000000000050 /* AppMetaBuildTests */,
 			);
 		};
 /* End PBXProject section */
@@ -159,7 +201,33 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		B20000000000000000000051 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				B20000000000000000000021 /* PipelineTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXContainerItemProxy section */
+		B20000000000000000000080 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000016 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000050;
+			remoteInfo = AppMetaBuild;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXTargetDependency section */
+		B20000000000000000000081 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = A10000000000000000000050 /* AppMetaBuild */;
+			targetProxy = B20000000000000000000080 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		A10000000000000000000061 /* Debug */ = {
@@ -206,6 +274,7 @@
 				CURRENT_PROJECT_VERSION = 12;
 				ENABLE_APP_SANDBOX = NO;
 				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = AppMetaBuild/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "AppMeta Build";
@@ -218,6 +287,7 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.appmeta.build;
+				PRODUCT_MODULE_NAME = AppMetaBuild;
 				PRODUCT_NAME = "AppMeta Build";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
@@ -246,9 +316,50 @@
 				MACOSX_DEPLOYMENT_TARGET = 13.0;
 				MARKETING_VERSION = 1.1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = io.appmeta.build;
+				PRODUCT_MODULE_NAME = AppMetaBuild;
 				PRODUCT_NAME = "AppMeta Build";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		B20000000000000000000071 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.appmeta.build.tests;
+				PRODUCT_NAME = AppMetaBuildTests;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AppMeta Build.app/Contents/MacOS/AppMeta Build";
+			};
+			name = Debug;
+		};
+		B20000000000000000000072 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@loader_path/../Frameworks",
+				);
+				MACOSX_DEPLOYMENT_TARGET = 13.0;
+				PRODUCT_BUNDLE_IDENTIFIER = io.appmeta.build.tests;
+				PRODUCT_NAME = AppMetaBuildTests;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_VERSION = 5.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AppMeta Build.app/Contents/MacOS/AppMeta Build";
 			};
 			name = Release;
 		};
@@ -269,6 +380,15 @@
 			buildConfigurations = (
 				A10000000000000000000071 /* Debug */,
 				A10000000000000000000072 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		B20000000000000000000070 /* Build configuration list for PBXNativeTarget "AppMetaBuildTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				B20000000000000000000071 /* Debug */,
+				B20000000000000000000072 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

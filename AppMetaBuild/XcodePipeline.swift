@@ -2,9 +2,10 @@ import Foundation
 import CryptoKit
 
 final class XcodePipeline: @unchecked Sendable {
-    private let commands: CommandExecuting
     private static let profileCacheLock = NSLock()
     private static var profileCache: [String: ProfileCacheEntry] = [:]
+
+    let commands: CommandExecuting
 
     init(commands: CommandExecuting = CommandSession()) {
         self.commands = commands
@@ -234,11 +235,25 @@ final class XcodePipeline: @unchecked Sendable {
             ))
         }
         onStage("upload", L10n.t("Uploading IPA to App Store Connect.", "正在上传 IPA 到 App Store Connect。"))
+        let transporterPath = try locateTransporter()
+        try checkCancelled()
         let keyDir = try Self.prepareKeyDir(credentials)
         defer { try? FileManager.default.removeItem(at: keyDir) }
-        let env = ["API_PRIVATE_KEYS_DIR": keyDir.path]
-        let directory = (ipa as NSString).deletingLastPathComponent
-        let transporterPath: String
+        try deliver(
+            ipa: ipa,
+            credentials: credentials,
+            transporterPath: transporterPath,
+            keyDirectory: keyDir,
+            logFile: logFile,
+            onLog: onLog
+        )
+        onStage("uploaded", L10n.t(
+            "Delivery succeeded. Apple still needs to process the build before it appears in App Store Connect.",
+            "投递成功。Apple 还要处理构建，之后才会出现在 App Store Connect。"
+        ))
+    }
+
+    func locateTransporter() throws -> String {
         do {
             let transporter = try commands.run(
                 arguments: ["/usr/bin/xcrun", "--find", "iTMSTransporter"],
@@ -247,12 +262,24 @@ final class XcodePipeline: @unchecked Sendable {
                 onLog: nil,
                 logFile: nil
             )
-            transporterPath = String(decoding: transporter.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return String(decoding: transporter.stdout, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         } catch BuildError.cancelled {
             throw BuildError.cancelled
         } catch {
-            transporterPath = ""
+            return ""
         }
+    }
+
+    func deliver(
+        ipa: String,
+        credentials: Credentials,
+        transporterPath: String,
+        keyDirectory: URL,
+        logFile: URL?,
+        onLog: @escaping (String) -> Void
+    ) throws {
+        let env = ["API_PRIVATE_KEYS_DIR": keyDirectory.path]
+        let directory = (ipa as NSString).deletingLastPathComponent
         if transporterPath.isEmpty {
             onLog("iTMSTransporter was not found, trying altool")
             try runStreaming(onLog: onLog, arguments: [
@@ -271,10 +298,6 @@ final class XcodePipeline: @unchecked Sendable {
                 "-apiIssuer", credentials.issuerId,
             ], directory: directory, extraEnv: env, logFile: logFile)
         }
-        onStage("uploaded", L10n.t(
-            "Delivery succeeded. Apple still needs to process the build before it appears in App Store Connect.",
-            "投递成功。Apple 还要处理构建，之后才会出现在 App Store Connect。"
-        ))
     }
 
     private func runCapturing(_ arguments: [String]) throws -> Data {
