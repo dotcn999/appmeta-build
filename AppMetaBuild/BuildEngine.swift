@@ -43,7 +43,8 @@ final class BuildEngine: ObservableObject {
 
     nonisolated let pipeline: XcodePipeline
     private var logLines: [String] = []
-    private var activity = ""
+    /// export | exportUpload | upload | inspect — used by the stage progress UI.
+    private(set) var activity = ""
     static let maxLogLines = 4000
 
     var credentials: Credentials { CredentialsStore.shared.credentials }
@@ -210,7 +211,7 @@ final class BuildEngine: ObservableObject {
             upload: upload,
             credentials: credentials
         )
-        guard beginWork(clearLog: true, clearArtifact: true, activity: "export") else { return }
+        guard beginWork(clearLog: true, clearArtifact: true, activity: upload ? "exportUpload" : "export") else { return }
         let pipeline = self.pipeline
         let sink = makeSink()
         pipeline.prepareForNewOperation()
@@ -362,7 +363,7 @@ final class BuildEngine: ObservableObject {
         wasCancelled = false
         if !artifact.isEmpty {
             failureKind = "upload"
-        } else if kind == "export" {
+        } else if kind == "export" || kind == "exportUpload" {
             failureKind = "archive"
         } else {
             failureKind = "failed"
