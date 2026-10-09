@@ -23,7 +23,7 @@ struct AppMetaBuildApp: App {
             ContentView()
                 .environmentObject(appearance)
                 .preferredColorScheme(appearance.preferredScheme)
-                .tint(Color(red: 0.09, green: 0.41, blue: 0.88))
+                .tint(Color(red: 0.11, green: 0.39, blue: 0.86))
                 .frame(minWidth: 720, minHeight: 440)
         }
         .windowStyle(.titleBar)
