@@ -6,15 +6,13 @@ import Security
 enum KeychainStore {
     static let service = "io.appmeta.build.api-key"
 
+    /// Saves into the data-protection keychain so access is not re-ACL'd to each
+    /// ad-hoc code signature. Rebuilding the app no longer prompts for the login password.
     static func save(keyId: String, pem: Data) throws {
         delete(account: keyId)
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: keyId,
-            kSecValueData as String: pem,
-            kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-        ]
+        var query = baseQuery(account: keyId, dataProtection: true)
+        query[kSecValueData as String] = pem
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
         let status = SecItemAdd(query as CFDictionary, nil)
         guard status == errSecSuccess else {
             throw BuildError.message(L10n.t(
@@ -25,26 +23,57 @@ enum KeychainStore {
     }
 
     static func load(keyId: String) -> Data? {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: keyId,
-            kSecReturnData as String: true,
-            kSecMatchLimit as String: kSecMatchLimitOne,
-        ]
-        var item: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
-        return item as? Data
+        guard !keyId.isEmpty else { return nil }
+        if let data = copyData(account: keyId, dataProtection: true) {
+            return data
+        }
+        // One-shot migration from the legacy file-based login keychain item.
+        guard let legacy = copyData(account: keyId, dataProtection: false) else { return nil }
+        try? save(keyId: keyId, pem: legacy)
+        return legacy
+    }
+
+    /// Presence check without returning the secret when possible.
+    static func contains(keyId: String) -> Bool {
+        guard !keyId.isEmpty else { return false }
+        if hasItem(account: keyId, dataProtection: true) { return true }
+        guard let legacy = copyData(account: keyId, dataProtection: false) else { return false }
+        try? save(keyId: keyId, pem: legacy)
+        return true
     }
 
     static func delete(account: String) {
         guard !account.isEmpty else { return }
-        let query: [String: Any] = [
+        SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
+        SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+    }
+
+    private static func baseQuery(account: String, dataProtection: Bool) -> [String: Any] {
+        var query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
             kSecAttrAccount as String: account,
         ]
-        SecItemDelete(query as CFDictionary)
+        if dataProtection {
+            query[kSecUseDataProtectionKeychain as String] = true
+        }
+        return query
+    }
+
+    private static func hasItem(account: String, dataProtection: Bool) -> Bool {
+        var query = baseQuery(account: account, dataProtection: dataProtection)
+        query[kSecReturnData as String] = false
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
+    private static func copyData(account: String, dataProtection: Bool) -> Data? {
+        var query = baseQuery(account: account, dataProtection: dataProtection)
+        query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        var item: CFTypeRef?
+        guard SecItemCopyMatching(query as CFDictionary, &item) == errSecSuccess else { return nil }
+        return item as? Data
     }
 }
 
@@ -71,7 +100,8 @@ final class CredentialsStore: ObservableObject {
         credentials = decoded
         migrateLegacyKeyIfNeeded()
         if credentials.hasPrivateKey {
-            credentials.hasPrivateKey = KeychainStore.load(keyId: credentials.storedKeyId) != nil
+            // Avoid pulling the PEM on every launch; presence is enough for the UI flag.
+            credentials.hasPrivateKey = KeychainStore.contains(keyId: credentials.storedKeyId)
         }
     }
 
