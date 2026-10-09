@@ -275,6 +275,77 @@ final class PipelineTests: XCTestCase {
         XCTAssertTrue(gate.begin(second))
     }
 
+    func testProvisioningProfileStaysOffPackageTargets() {
+        let project = """
+        {
+        \tobjects = {
+        \t\tAAAAAAAAAAAAAAAAAAAAAAAA /* App */ = {
+        \t\t\tisa = PBXNativeTarget;
+        \t\t\tbuildConfigurationList = BBBBBBBBBBBBBBBBBBBBBBBB /* list */;
+        \t\t\tname = App;
+        \t\t\tproductType = "com.apple.product-type.application";
+        \t\t};
+        \t\tCCCCCCCCCCCCCCCCCCCCCCCC /* Snap */ = {
+        \t\t\tisa = PBXNativeTarget;
+        \t\t\tbuildConfigurationList = DDDDDDDDDDDDDDDDDDDDDDDD /* list */;
+        \t\t\tname = SnapKit_SnapKit;
+        \t\t\tproductType = "com.apple.product-type.framework";
+        \t\t};
+        \t\tBBBBBBBBBBBBBBBBBBBBBBBB /* list */ = {
+        \t\t\tisa = XCConfigurationList;
+        \t\t\tbuildConfigurations = (
+        \t\t\t\tEEEEEEEEEEEEEEEEEEEEEEEE /* Debug */,
+        \t\t\t\t111111111111111111111111 /* Release */,
+        \t\t\t);
+        \t\t\tdefaultConfigurationName = Debug;
+        \t\t};
+        \t\tDDDDDDDDDDDDDDDDDDDDDDDD /* list */ = {
+        \t\t\tisa = XCConfigurationList;
+        \t\t\tbuildConfigurations = (
+        \t\t\t\tFFFFFFFFFFFFFFFFFFFFFFFF /* Debug */,
+        \t\t\t);
+        \t\t\tdefaultConfigurationName = Debug;
+        \t\t};
+        \t\tEEEEEEEEEEEEEEEEEEEEEEEE /* Debug */ = {
+        \t\t\tisa = XCBuildConfiguration;
+        \t\t\tbuildSettings = {
+        \t\t\t\tPRODUCT_BUNDLE_IDENTIFIER = com.example.app;
+        \t\t\t\tPROVISIONING_PROFILE_SPECIFIER = "";
+        \t\t\t\t"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = test_dev;
+        \t\t\t};
+        \t\t\tname = Debug;
+        \t\t};
+        \t\t111111111111111111111111 /* Release */ = {
+        \t\t\tisa = XCBuildConfiguration;
+        \t\t\tbuildSettings = {
+        \t\t\t\t"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]" = release_profile;
+        \t\t\t};
+        \t\t\tname = Release;
+        \t\t};
+        \t\tFFFFFFFFFFFFFFFFFFFFFFFF /* Debug */ = {
+        \t\t\tisa = XCBuildConfiguration;
+        \t\t\tbuildSettings = {
+        \t\t\t\tPRODUCT_NAME = Snap;
+        \t\t\t};
+        \t\t\tname = Debug;
+        \t\t};
+        \t};
+        }
+        """
+        let updated = XcodePipeline.rewriteTargetProfiles(
+            pbxproj: project,
+            configuration: "Debug",
+            profilesByTarget: ["App": "App Store"]
+        )
+        XCTAssertTrue(updated.contains("\"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]\" = \"App Store\";"))
+        XCTAssertTrue(updated.contains("PROVISIONING_PROFILE_SPECIFIER = \"\";"))
+        XCTAssertTrue(updated.contains("release_profile"))
+        XCTAssertFalse(updated.contains("test_dev"))
+        let snap = updated.components(separatedBy: "FFFFFFFFFFFFFFFFFFFFFFFF").last ?? ""
+        XCTAssertFalse(snap.contains("App Store"))
+        XCTAssertFalse(snap.contains("PROVISIONING_PROFILE_SPECIFIER"))
+    }
+
     func testKeyIDRejectsPathCharacters() {
         XCTAssertFalse(Credentials.isValidKeyID("../secret"))
         XCTAssertFalse(Credentials.isValidKeyID("short"))

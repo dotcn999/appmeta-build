@@ -169,6 +169,14 @@ final class XcodePipeline: @unchecked Sendable {
         onStage("archive", config)
         emit("xcodebuild archive \(container.flag) \(container.path) -scheme \(scheme) -configuration \(config)")
         let workDirectory = URL(fileURLWithPath: container.path).deletingLastPathComponent().path
+        let profileBackups = try Self.installTargetProfiles(
+            containerPath: container.path,
+            configuration: config,
+            products: products,
+            mainBundleId: bundleId,
+            mainProfile: profile
+        )
+        defer { Self.restoreProjectFiles(profileBackups) }
         var archiveArguments = [
             "/usr/bin/xcodebuild", "archive",
             container.flag, container.path,
@@ -179,11 +187,11 @@ final class XcodePipeline: @unchecked Sendable {
             "CODE_SIGN_STYLE=Manual",
         ]
         if !teamId.isEmpty { archiveArguments.append("DEVELOPMENT_TEAM=\(teamId)") }
-        if products.count <= 1, !profile.isEmpty {
-            archiveArguments.append("PROVISIONING_PROFILE_SPECIFIER=\(profile)")
-        }
         if !signingIdentity.isEmpty { archiveArguments.append("CODE_SIGN_IDENTITY=\(signingIdentity)") }
+        // A command-line PROVISIONING_PROFILE_SPECIFIER applies to every target, including
+        // Swift packages. Xcode 26 then fails the archive with "does not support provisioning profiles".
         try runStreaming(onLog: emit, arguments: archiveArguments, directory: workDirectory)
+        Self.restoreProjectFiles(profileBackups)
         try checkCancelled()
 
         onStage("export", "")
@@ -1033,6 +1041,205 @@ final class XcodePipeline: @unchecked Sendable {
             product.isMain = product.bundleId == mainBundleId
             return product
         }
+    }
+
+    struct ProjectTextBackup {
+        var url: URL
+        var original: String
+    }
+
+    static func signingProfilesByTarget(products: [SignedProduct], mainBundleId: String, mainProfile: String) -> [String: String] {
+        var map: [String: String] = [:]
+        for product in products {
+            let name = product.bundleId == mainBundleId && !mainProfile.isEmpty ? mainProfile : product.profileName
+            guard !product.target.isEmpty, !name.isEmpty else { continue }
+            map[product.target] = name
+        }
+        return map
+    }
+
+    /// Writes the selected profile onto signed targets only, then the caller restores the project file.
+    static func installTargetProfiles(
+        containerPath: String,
+        configuration: String,
+        products: [SignedProduct],
+        mainBundleId: String,
+        mainProfile: String
+    ) throws -> [ProjectTextBackup] {
+        let assignments = signingProfilesByTarget(products: products, mainBundleId: mainBundleId, mainProfile: mainProfile)
+        guard !assignments.isEmpty else { return [] }
+        var backups: [ProjectTextBackup] = []
+        for file in pbxprojFiles(containerPath) {
+            guard let original = try? String(contentsOf: file, encoding: .utf8) else { continue }
+            let updated = rewriteTargetProfiles(pbxproj: original, configuration: configuration, profilesByTarget: assignments)
+            guard updated != original else { continue }
+            try updated.write(to: file, atomically: true, encoding: .utf8)
+            backups.append(ProjectTextBackup(url: file, original: original))
+        }
+        return backups
+    }
+
+    static func restoreProjectFiles(_ backups: [ProjectTextBackup]) {
+        for backup in backups {
+            try? backup.original.write(to: backup.url, atomically: true, encoding: .utf8)
+        }
+    }
+
+    static func rewriteTargetProfiles(pbxproj: String, configuration: String, profilesByTarget: [String: String]) -> String {
+        guard !profilesByTarget.isEmpty else { return pbxproj }
+        let objects = pbxObjects(in: pbxproj)
+        var profileByConfigID: [String: String] = [:]
+        for target in objects where target.body.contains("isa = PBXNativeTarget;") {
+            guard let name = pbxName(in: target.body),
+                  let profile = profilesByTarget[name],
+                  let listID = pbxID("buildConfigurationList", in: target.body),
+                  let list = objects.first(where: { $0.id == listID }) else { continue }
+            for configID in configurationIDs(in: list.body, named: configuration) {
+                profileByConfigID[configID] = profile
+            }
+        }
+        guard !profileByConfigID.isEmpty else { return pbxproj }
+        var result = pbxproj
+        for object in objects.reversed() where profileByConfigID[object.id] != nil {
+            guard let profile = profileByConfigID[object.id] else { continue }
+            let updatedBody = replacingProfile(in: object.body, profile: profile)
+            guard updatedBody != object.body else { continue }
+            result.replaceSubrange(object.range, with: updatedBody)
+        }
+        return result
+    }
+
+    private struct PBXObject {
+        var id: String
+        var body: String
+        var range: Range<String.Index>
+    }
+
+    private static func pbxObjects(in text: String) -> [PBXObject] {
+        var objects: [PBXObject] = []
+        var index = text.startIndex
+        while index < text.endIndex {
+            guard text.distance(from: index, to: text.endIndex) >= 26,
+                  text[index...].hasPrefix("\t\t") else {
+                if index < text.endIndex { index = text.index(after: index) }
+                else { break }
+                continue
+            }
+            let idStart = text.index(index, offsetBy: 2)
+            guard let idEnd = text[idStart...].firstIndex(where: { !$0.isHexDigit }),
+                  text.distance(from: idStart, to: idEnd) == 24 else {
+                index = text.index(after: index)
+                continue
+            }
+            let id = String(text[text.index(index, offsetBy: 2)..<idEnd])
+            guard let close = text.range(of: "\n\t\t};", range: idEnd..<text.endIndex) else { break }
+            let end = close.upperBound
+            objects.append(PBXObject(id: id, body: String(text[index..<end]), range: index..<end))
+            index = end
+        }
+        return objects
+    }
+
+    private static func pbxID(_ key: String, in body: String) -> String? {
+        let pattern = #"(?m)^\t\t\t\#(NSRegularExpression.escapedPattern(for: key)) = ([A-Fa-f0-9]{24})\b"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)),
+              let range = Range(match.range(at: 1), in: body) else { return nil }
+        return String(body[range])
+    }
+
+    private static func pbxName(in body: String) -> String? {
+        let pattern = #"(?m)^\t\t\tname = (?:"([^"]+)"|([^";]+));"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: body, range: NSRange(body.startIndex..., in: body)) else { return nil }
+        if let quoted = Range(match.range(at: 1), in: body) { return String(body[quoted]) }
+        if let bare = Range(match.range(at: 2), in: body) { return String(body[bare]) }
+        return nil
+    }
+
+    private static func configurationIDs(in listBody: String, named configuration: String) -> [String] {
+        let pattern = #"([A-Fa-f0-9]{24}) /\* \#(NSRegularExpression.escapedPattern(for: configuration)) \*/"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return regex.matches(in: listBody, range: NSRange(listBody.startIndex..., in: listBody)).compactMap { match in
+            Range(match.range(at: 1), in: listBody).map { String(listBody[$0]) }
+        }
+    }
+
+    private static func replacingProfile(in body: String, profile: String) -> String {
+        guard let settingsStart = body.range(of: "buildSettings = {"),
+              let settingsEnd = endOfBraceBlock(in: body, openBrace: body.index(before: settingsStart.upperBound)) else {
+            return body
+        }
+        let block = String(body[settingsStart.upperBound..<settingsEnd])
+        let value = pbxQuoted(profile)
+        var lines = block.components(separatedBy: "\n")
+        var changedSDK = false
+        for index in lines.indices {
+            let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+            guard trimmed.hasPrefix("\"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]\"") else { continue }
+            let indent = String(lines[index].prefix { $0 == "\t" || $0 == " " })
+            lines[index] = indent + "\"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]\" = \(value);"
+            changedSDK = true
+        }
+        if !changedSDK {
+            var changedPlain = false
+            for index in lines.indices {
+                let trimmed = lines[index].trimmingCharacters(in: .whitespaces)
+                guard trimmed.hasPrefix("PROVISIONING_PROFILE_SPECIFIER ") || trimmed.hasPrefix("PROVISIONING_PROFILE_SPECIFIER=") else { continue }
+                let indent = String(lines[index].prefix { $0 == "\t" || $0 == " " })
+                lines[index] = indent + "PROVISIONING_PROFILE_SPECIFIER = \(value);"
+                changedPlain = true
+                break
+            }
+            if !changedPlain {
+                let indent = lines.compactMap { line -> String? in
+                    let trimmed = line.trimmingCharacters(in: .whitespaces)
+                    guard !trimmed.isEmpty, trimmed != "{" else { return nil }
+                    return String(line.prefix { $0 == "\t" || $0 == " " })
+                }.first ?? "\t\t\t\t"
+                lines.insert(indent + "\"PROVISIONING_PROFILE_SPECIFIER[sdk=iphoneos*]\" = \(value);", at: max(lines.count - 1, 0))
+            }
+        }
+        var updated = body
+        updated.replaceSubrange(settingsStart.upperBound..<settingsEnd, with: lines.joined(separator: "\n"))
+        return updated
+    }
+
+    private static func endOfBraceBlock(in text: String, openBrace: String.Index) -> String.Index? {
+        var depth = 0
+        var index = openBrace
+        var inString = false
+        var escaped = false
+        while index < text.endIndex {
+            let character = text[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 { return index }
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
+    private static func pbxQuoted(_ value: String) -> String {
+        let bare = value.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" || $0 == "-" || $0 == "." }
+        if bare && !value.isEmpty { return value }
+        let escaped = value
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+        return "\"\(escaped)\""
     }
 
     static func profileMap(products: [SignedProduct], mainBundleId: String, mainProfile: String) -> [String: String] {
