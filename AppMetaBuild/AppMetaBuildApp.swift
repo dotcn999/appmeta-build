@@ -24,12 +24,12 @@ struct AppMetaBuildApp: App {
                 .environmentObject(appearance)
                 .preferredColorScheme(appearance.preferredScheme)
                 .tint(Color(red: 0.11, green: 0.39, blue: 0.86))
-                .frame(minWidth: 720, minHeight: 440)
+                .frame(minWidth: 720, minHeight: 480)
         }
         .windowStyle(.titleBar)
         .windowResizability(.contentMinSize)
         .windowToolbarStyle(.unified)
-        .defaultSize(width: 880, height: 540)
+        .defaultSize(width: 960, height: 640)
         .defaultPosition(.center)
     }
 }

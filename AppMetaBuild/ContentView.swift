@@ -16,7 +16,7 @@ struct ContentView: View {
     var body: some View {
         HSplitView {
             leftPane
-                .frame(minWidth: 320, idealWidth: 360, maxWidth: 440)
+                .frame(minWidth: 340, idealWidth: 400, maxWidth: 480)
             logPane
                 .frame(minWidth: 360)
         }
@@ -158,10 +158,20 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 10) {
             sectionTitle(L10n.t("API Key", "API Key"),
                          subtitle: L10n.t("Stored only on this Mac.", "仅保存在这台 Mac 上。"))
-            labeledField("Key ID", text: $credentialsStore.credentials.keyId)
-                .disabled(engine.busy)
-            labeledField("Issuer ID", text: $credentialsStore.credentials.issuerId)
-                .disabled(engine.busy)
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: 10) {
+                    labeledField("Key ID", text: $credentialsStore.credentials.keyId)
+                        .disabled(engine.busy)
+                    labeledField("Issuer ID", text: $credentialsStore.credentials.issuerId)
+                        .disabled(engine.busy)
+                }
+                VStack(alignment: .leading, spacing: 10) {
+                    labeledField("Key ID", text: $credentialsStore.credentials.keyId)
+                        .disabled(engine.busy)
+                    labeledField("Issuer ID", text: $credentialsStore.credentials.issuerId)
+                        .disabled(engine.busy)
+                }
+            }
             if !credentialsStore.credentials.keyId.isEmpty && !Credentials.isValidKeyID(credentialsStore.credentials.keyId) {
                 Text(L10n.t("Key ID must be 10 letters or digits.", "Key ID 必须是 10 位字母或数字。"))
                     .font(.caption)
@@ -194,12 +204,20 @@ struct ContentView: View {
                           okText: L10n.t("Key ready", "密钥已就绪"),
                           badText: L10n.t("Key incomplete", "密钥未配齐"))
             }
-            Text(credentialsStore.credentials.hasPrivateKey
-                 ? L10n.t("Private key is in the login keychain.", "私钥已保存在登录钥匙串。")
-                 : L10n.t("No private key saved.", "尚未保存私钥。"))
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
+            if !credentialsStore.importError.isEmpty {
+                Text(credentialsStore.importError)
+                    .font(.caption)
+                    .foregroundStyle(Theme.danger)
+                    .textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text(credentialsStore.credentials.hasPrivateKey
+                     ? L10n.t("Private key is in the login keychain.", "私钥已保存在登录钥匙串。")
+                     : L10n.t("No private key saved.", "尚未保存私钥。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+            }
         }
         .padding(14)
         .background(cardBackground)
@@ -271,29 +289,23 @@ struct ContentView: View {
                             "Bundle ID 随所选 Scheme 变化。★ 表示工程里已指定。"
                          ))
             if let ins = engine.inspect {
-                labeledPicker(L10n.t("Scheme", "Scheme"), selection: $engine.scheme, options: ins.schemes)
-                    .disabled(builds.isBusy)
-                    .onChange(of: engine.scheme) { engine.handleSchemeChange($0) }
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(L10n.t("Profile", "描述文件"))
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Picker(L10n.t("Profile", "描述文件"), selection: $engine.profile) {
-                        if ins.profiles.isEmpty {
-                            Text(L10n.t("No matching profile on this Mac", "本机没有匹配的描述文件")).tag("")
-                        }
-                        ForEach(engine.profileGroups) { group in
-                            Section(group.title) {
-                                ForEach(group.profiles) { profile in
-                                    Text(profile.displayName).tag(profile.value)
-                                        .disabled(!profile.selectable)
-                                }
-                            }
-                        }
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 12) {
+                        labeledPicker(L10n.t("Scheme", "Scheme"), selection: $engine.scheme, options: ins.schemes)
+                            .frame(minWidth: 140, idealWidth: 180, maxWidth: 220, alignment: .leading)
+                            .disabled(builds.isBusy)
+                        profilePicker(ins)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .disabled(engine.busy)
                     }
-                    .labelsHidden()
-                    .disabled(engine.busy)
+                    VStack(alignment: .leading, spacing: 10) {
+                        labeledPicker(L10n.t("Scheme", "Scheme"), selection: $engine.scheme, options: ins.schemes)
+                            .disabled(builds.isBusy)
+                        profilePicker(ins)
+                            .disabled(engine.busy)
+                    }
                 }
+                .onChange(of: engine.scheme) { engine.handleSchemeChange($0) }
 
                 signingChips(ins)
 
@@ -639,6 +651,11 @@ struct ContentView: View {
                         .transition(.opacity.combined(with: .scale(scale: 0.92)))
                 }
 
+                if engine.busy {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+
                 Spacer()
 
                 Button {
@@ -774,6 +791,28 @@ struct ContentView: View {
             Text(title).font(.caption).foregroundStyle(.secondary)
             Picker("", selection: selection) {
                 ForEach(options, id: \.self) { Text($0).tag($0) }
+            }
+            .labelsHidden()
+        }
+    }
+
+    private func profilePicker(_ ins: InspectResult) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(L10n.t("Profile", "描述文件"))
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Picker(L10n.t("Profile", "描述文件"), selection: $engine.profile) {
+                if ins.profiles.isEmpty {
+                    Text(L10n.t("No matching profile on this Mac", "本机没有匹配的描述文件")).tag("")
+                }
+                ForEach(engine.profileGroups) { group in
+                    Section(group.title) {
+                        ForEach(group.profiles) { profile in
+                            Text(profile.displayName).tag(profile.value)
+                                .disabled(!profile.selectable)
+                        }
+                    }
+                }
             }
             .labelsHidden()
         }

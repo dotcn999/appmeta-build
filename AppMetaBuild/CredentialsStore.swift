@@ -6,20 +6,18 @@ import Security
 enum KeychainStore {
     static let service = "io.appmeta.build.api-key"
 
-    /// Saves into the data-protection keychain so access is not re-ACL'd to each
-    /// ad-hoc code signature. Rebuilding the app no longer prompts for the login password.
+    /// Prefer the data-protection keychain (no per-build ACL prompts). Fall back to the
+    /// classic login keychain when DP is unavailable — common for ad-hoc / no-Team signing.
     static func save(keyId: String, pem: Data) throws {
         delete(account: keyId)
-        var query = baseQuery(account: keyId, dataProtection: true)
-        query[kSecValueData as String] = pem
-        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        let status = SecItemAdd(query as CFDictionary, nil)
-        guard status == errSecSuccess else {
-            throw BuildError.message(L10n.t(
-                "Could not save the private key to the login keychain (\(status)).",
-                "无法把私钥写入登录钥匙串（\(status)）。"
-            ))
-        }
+        let dp = add(account: keyId, pem: pem, dataProtection: true)
+        if dp == errSecSuccess { return }
+        let legacy = add(account: keyId, pem: pem, dataProtection: false)
+        if legacy == errSecSuccess { return }
+        throw BuildError.message(L10n.t(
+            "Could not save the private key to the keychain (data-protection \(dp), login \(legacy)).",
+            "无法把私钥写入钥匙串（数据保护 \(dp)，登录钥匙串 \(legacy)）。"
+        ))
     }
 
     static func load(keyId: String) -> Data? {
@@ -27,25 +25,39 @@ enum KeychainStore {
         if let data = copyData(account: keyId, dataProtection: true) {
             return data
         }
-        // One-shot migration from the legacy file-based login keychain item.
-        guard let legacy = copyData(account: keyId, dataProtection: false) else { return nil }
-        try? save(keyId: keyId, pem: legacy)
-        return legacy
+        if let legacy = copyData(account: keyId, dataProtection: false) {
+            // Migrate into DP when possible so later runs avoid ACL prompts.
+            try? save(keyId: keyId, pem: legacy)
+            return legacy
+        }
+        return nil
     }
 
     /// Presence check without returning the secret when possible.
     static func contains(keyId: String) -> Bool {
         guard !keyId.isEmpty else { return false }
         if hasItem(account: keyId, dataProtection: true) { return true }
-        guard let legacy = copyData(account: keyId, dataProtection: false) else { return false }
-        try? save(keyId: keyId, pem: legacy)
-        return true
+        if hasItem(account: keyId, dataProtection: false) {
+            if let legacy = copyData(account: keyId, dataProtection: false) {
+                try? save(keyId: keyId, pem: legacy)
+            }
+            return true
+        }
+        return false
     }
 
     static func delete(account: String) {
         guard !account.isEmpty else { return }
         SecItemDelete(baseQuery(account: account, dataProtection: true) as CFDictionary)
         SecItemDelete(baseQuery(account: account, dataProtection: false) as CFDictionary)
+    }
+
+    private static func add(account: String, pem: Data, dataProtection: Bool) -> OSStatus {
+        var query = baseQuery(account: account, dataProtection: dataProtection)
+        query[kSecValueData as String] = pem
+        query[kSecAttrLabel as String] = "AppMeta Build API Key"
+        query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        return SecItemAdd(query as CFDictionary, nil)
     }
 
     private static func baseQuery(account: String, dataProtection: Bool) -> [String: Any] {
@@ -81,6 +93,8 @@ final class CredentialsStore: ObservableObject {
     static let shared = CredentialsStore()
 
     @Published var credentials = Credentials()
+    /// Shown under the API Key card when importing a .p8 fails.
+    @Published var importError = ""
 
     private var supportDirectory: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -123,16 +137,17 @@ final class CredentialsStore: ObservableObject {
     }
 
     func choosePrivateKey() throws {
+        importError = ""
         let keyId = credentials.keyId.trimmingCharacters(in: .whitespacesAndNewlines)
         let issuerId = credentials.issuerId.trimmingCharacters(in: .whitespacesAndNewlines)
         guard Credentials.isValidKeyID(keyId) else {
-            throw BuildError.message(L10n.t(
+            throw keyFailure(L10n.t(
                 "Key ID must be 10 letters or digits before the private key can be saved.",
                 "保存私钥前，Key ID 必须是 10 位字母或数字。"
             ))
         }
         guard Credentials.isValidIssuerID(issuerId) else {
-            throw BuildError.message(L10n.t(
+            throw keyFailure(L10n.t(
                 "Issuer ID must be a UUID before the private key can be saved.",
                 "保存私钥前，Issuer ID 必须是 UUID。"
             ))
@@ -145,25 +160,53 @@ final class CredentialsStore: ObservableObject {
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let src = panel.url else { return }
-        let pem = try Data(contentsOf: src)
-        try KeychainStore.save(keyId: keyId, pem: pem)
-        credentials.keyId = keyId
-        credentials.issuerId = issuerId
-        credentials.storedKeyId = keyId
-        credentials.hasPrivateKey = true
-        credentials.legacyPrivateKeyPath = ""
+        let accessed = src.startAccessingSecurityScopedResource()
+        defer { if accessed { src.stopAccessingSecurityScopedResource() } }
+        let pem: Data
+        do {
+            pem = try Data(contentsOf: src)
+        } catch {
+            throw keyFailure(L10n.t(
+                "Could not read the selected .p8 file: \(error.localizedDescription)",
+                "无法读取所选 .p8 文件：\(error.localizedDescription)"
+            ))
+        }
+        guard !pem.isEmpty else {
+            throw keyFailure(L10n.t("The selected .p8 file is empty.", "所选 .p8 文件是空的。"))
+        }
+        do {
+            try KeychainStore.save(keyId: keyId, pem: pem)
+        } catch {
+            throw keyFailure(error.localizedDescription)
+        }
+        var next = credentials
+        next.keyId = keyId
+        next.issuerId = issuerId
+        next.storedKeyId = keyId
+        next.hasPrivateKey = true
+        next.legacyPrivateKeyPath = ""
+        credentials = next
+        importError = ""
         save()
         removeLegacyKeyFiles()
     }
 
     func removePrivateKey() {
+        importError = ""
         KeychainStore.delete(account: credentials.storedKeyId)
         KeychainStore.delete(account: credentials.keyId)
-        credentials.hasPrivateKey = false
-        credentials.storedKeyId = ""
-        credentials.legacyPrivateKeyPath = ""
+        var next = credentials
+        next.hasPrivateKey = false
+        next.storedKeyId = ""
+        next.legacyPrivateKeyPath = ""
+        credentials = next
         save()
         removeLegacyKeyFiles()
+    }
+
+    private func keyFailure(_ message: String) -> Error {
+        importError = message
+        return BuildError.message(message)
     }
 
     private func migrateLegacyKeyIfNeeded() {
@@ -174,10 +217,12 @@ final class CredentialsStore: ObservableObject {
         let keyId = credentials.keyId.trimmingCharacters(in: .whitespacesAndNewlines)
         do {
             try KeychainStore.save(keyId: keyId, pem: pem)
-            credentials.keyId = keyId
-            credentials.storedKeyId = keyId
-            credentials.hasPrivateKey = true
-            credentials.legacyPrivateKeyPath = ""
+            var next = credentials
+            next.keyId = keyId
+            next.storedKeyId = keyId
+            next.hasPrivateKey = true
+            next.legacyPrivateKeyPath = ""
+            credentials = next
             save()
             removeLegacyKeyFiles()
         } catch {
