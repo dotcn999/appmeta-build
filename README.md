@@ -4,6 +4,11 @@ Independent macOS app for Xcode Archive → manual-signed IPA export → App Sto
 
 Independent macOS app. It does **not** depend on [appmeta-local](https://github.com/dotcn999/appmeta-local).
 
+## Website
+
+- 推广站（Cloudflare Workers）：https://appmeta-build.findo.workers.dev  
+- macOS 下载：https://github.com/dotcn999/appmeta-build/releases/latest  
+
 ## Open in Xcode
 
 1. Double-click `AppMetaBuild.xcodeproj`, or:

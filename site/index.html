@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AppMeta Build — macOS 上的 Archive · 导出 · 上传</title>
+  <meta name="description" content="独立的 macOS 工具：Xcode Archive、手动签名导出 IPA、上传 App Store Connect。密钥只留在本机。" />
+  <meta property="og:title" content="AppMeta Build" />
+  <meta property="og:description" content="Archive → 手动签名 IPA → App Store Connect，一条流水线。" />
+  <meta property="og:image" content="/assets/icon.png" />
+  <link rel="icon" href="/assets/icon-128.png" type="image/png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="noise" aria-hidden="true"></div>
+
+  <header class="top">
+    <a class="brand-mark" href="/">
+      <img src="/assets/icon-128.png" width="28" height="28" alt="" />
+      <span>AppMeta Build</span>
+    </a>
+    <nav>
+      <a href="#flow">流程</a>
+      <a href="#download">下载</a>
+      <a href="https://github.com/dotcn999/appmeta-build" rel="noopener" target="_blank">GitHub</a>
+    </nav>
+  </header>
+
+  <main>
+    <section class="hero">
+      <div class="hero-copy">
+        <p class="brand-hero">AppMeta Build</p>
+        <h1>把 Archive、导出、上传收成一条流水线</h1>
+        <p class="lede">独立的 macOS 应用。手动签名 IPA，密钥只存在本机钥匙串，不绑云端账号体系。</p>
+        <div class="cta-row">
+          <a class="btn primary" id="download-btn" href="#download">下载 macOS 版</a>
+          <a class="btn ghost" href="https://github.com/dotcn999/appmeta-build" rel="noopener" target="_blank">查看源码</a>
+        </div>
+        <p class="meta">macOS · 免费开源 · 需本机 Xcode</p>
+      </div>
+      <div class="hero-stage" aria-hidden="true">
+        <div class="stage-glow"></div>
+        <div class="pipeline">
+          <div class="pipe-node done"><span>API</span></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-node done"><span>工程</span></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-node active"><span>签名</span></div>
+          <div class="pipe-line"></div>
+          <div class="pipe-node"><span>构建</span></div>
+        </div>
+        <pre class="console"><code><span class="c-dim">$</span> archive · export · upload
+<span class="c-ok">** ARCHIVE SUCCEEDED **</span>
+<span class="c-ok">** EXPORT SUCCEEDED **</span>
+<span class="c-accent">IPA ready → App Store Connect</span></code></pre>
+      </div>
+    </section>
+
+    <section class="band" id="flow">
+      <h2>一条路径，三个动作</h2>
+      <p class="section-lede">从钥匙串里的 .p8，到识别工程与描述文件，再到 Archive 导出上传。</p>
+      <ol class="steps">
+        <li>
+          <span class="step-num">01</span>
+          <h3>配置 API Key</h3>
+          <p>Key ID、Issuer ID 与 AuthKey .p8 写入本机钥匙串，不落明文目录。</p>
+        </li>
+        <li>
+          <span class="step-num">02</span>
+          <h3>识别工程与签名</h3>
+          <p>选 .xcodeproj / workspace，匹配 Scheme、描述文件与证书。</p>
+        </li>
+        <li>
+          <span class="step-num">03</span>
+          <h3>Archive 并投递</h3>
+          <p>一键 Archive → 导出 IPA → 上传 App Store Connect，日志实时可见。</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="band download" id="download">
+      <h2>下载 AppMeta Build</h2>
+      <p class="section-lede">获取最新 macOS 构建（zip 内含 .app）。首次打开若被拦截，请右键 → 打开。</p>
+      <div class="download-panel">
+        <img src="/assets/icon.png" width="72" height="72" alt="AppMeta Build icon" />
+        <div>
+          <p class="dl-title">AppMeta Build <span id="version-label">for macOS</span></p>
+          <p class="dl-sub" id="dl-sub">正在解析最新版本…</p>
+          <div class="cta-row">
+            <a class="btn primary" id="dl-primary" href="https://github.com/dotcn999/appmeta-build/releases/latest">从 GitHub 下载</a>
+            <a class="btn ghost" href="https://github.com/dotcn999/appmeta-build/releases" rel="noopener" target="_blank">全部版本</a>
+          </div>
+        </div>
+      </div>
+      <p class="footnote">直接分发未公证的 .app 时，Gatekeeper 可能提示来自身份不明的开发者。源码可自行用 Xcode 编译。</p>
+    </section>
+  </main>
+
+  <footer>
+    <span>AppMeta Build</span>
+    <a href="https://github.com/dotcn999/appmeta-build" rel="noopener" target="_blank">GitHub</a>
+  </footer>
+
+  <script src="/main.js"></script>
+</body>
+</html>
