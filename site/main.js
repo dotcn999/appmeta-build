@@ -6,6 +6,7 @@ async function resolveLatestDownload() {
   const downloadBtn = document.getElementById("download-btn");
   const versionLabel = document.getElementById("version-label");
   const dlSub = document.getElementById("dl-sub");
+  if (!primary || !downloadBtn || !versionLabel || !dlSub) return;
 
   const fallback = `https://github.com/${REPO}/releases/latest`;
   primary.href = fallback;
@@ -61,4 +62,16 @@ function formatDate(iso) {
   }
 }
 
+function setupBrandFade() {
+  const brand = document.getElementById("brand-title");
+  if (!brand || window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  const onScroll = () => {
+    const y = Math.min(window.scrollY, 160);
+    brand.style.opacity = String(1 - y / 220);
+  };
+  window.addEventListener("scroll", onScroll, { passive: true });
+  onScroll();
+}
+
 resolveLatestDownload();
+setupBrandFade();
